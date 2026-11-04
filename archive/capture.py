@@ -43,27 +43,54 @@ def links(base, html):
 
 
 class Sink:
-    """Where captured bytes go. local -> ingest.ingest; http -> POST /ingest."""
-    def __init__(self, mode, api=None, token=None, run_id=None, vantage="dev-vps-2"):
+    """Where captured bytes go.
+      local    -> ingest.ingest (dev-vps-2: straight to B2 + index). Smoke tests and the local reachable sweep.
+      http     -> POST /ingest (pool / India-server workers that reach archive.s1d.me).
+      b2       -> upload the blob (and extracted text) straight to the archive B2 bucket and append one metadata line to a
+                  local JSONL. For a vantage (vpsin) that has the B2 write key but not the index; the JSONL is rsynced
+                  back and imported into the index with `archive.import_b2`. No tunnel, no large local disk use."""
+    def __init__(self, mode, api=None, token=None, run_id=None, vantage="dev-vps-2", jsonl=None):
         self.mode, self.api, self.token, self.run_id, self.vantage = mode, api, token, run_id, vantage
         if mode == "http":
             import aiohttp
             self._s = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"})
+        elif mode == "b2":
+            self._f = open(jsonl, "a")
 
     async def send(self, url, status, final_url, content, content_type, linked_from=None):
         if self.mode == "local":
             from . import ingest
             return await asyncio.to_thread(ingest.ingest, url, content, content_type=content_type, vantage=self.vantage,
                                            http_status=status, final_url=final_url, run_id=self.run_id, linked_from=linked_from)
+        if self.mode == "b2":
+            return await asyncio.to_thread(self._to_b2, url, status, final_url, content, content_type, linked_from)
         body = {"url": url, "http_status": status, "final_url": final_url, "content_type": content_type,
                 "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from,
                 "body_b64": base64.b64encode(content).decode() if content is not None else None}
         async with self._s.post(f"{self.api}/ingest", json=body) as r:
             return await r.json()
 
+    def _to_b2(self, url, status, final_url, content, content_type, linked_from):
+        from . import store, text
+        rec = {"url": url, "http_status": status, "final_url": final_url, "content_type": content_type,
+               "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from, "sha256": None, "size": 0,
+               "text_sha": None, "text_chars": 0}
+        if content is not None:
+            sha, _, _ = store.put_blob(content, content_type)
+            rec.update(sha256=sha, size=len(content))
+            txt = text.extract(content, content_type, url)
+            if txt:
+                store.put_text(sha, txt)
+                rec.update(text_sha=store.sha256(txt.encode("utf-8", "replace")), text_chars=len(txt))
+        self._f.write(json.dumps(rec) + "\n")
+        self._f.flush()
+        return rec
+
     async def close(self):
         if self.mode == "http":
             await self._s.close()
+        elif self.mode == "b2":
+            self._f.close()
 
 
 async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000, gap=GAP_S):
