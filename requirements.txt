@@ -1,0 +1,7 @@
+boto3
+psycopg[binary]
+selectolax
+pypdf
+fastapi
+uvicorn
+aiohttp
