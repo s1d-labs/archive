@@ -93,7 +93,7 @@ class Sink:
             self._f.close()
 
 
-async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000, gap=GAP_S):
+async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000, gap=GAP_S, proxy=None):
     host = urlsplit(start_url).hostname
     seen, seen_docs = set(), set()
     q = deque([start_url])
@@ -103,7 +103,7 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
         if url in seen:
             continue
         seen.add(url)
-        meta, body = await _get(session, url)
+        meta, body = await _get(session, url, proxy)
         await sink.send(url, meta["status"], meta.get("final"), body, meta.get("ctype"))
         pages += 1
         if body and b"html" in (meta.get("ctype") or "").encode():
@@ -114,16 +114,16 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
             for d in dl:
                 if d not in seen_docs and same_site(host, urlsplit(d).hostname) and docs < max_docs:
                     seen_docs.add(d)
-                    dmeta, dbody = await _get(session, d)
+                    dmeta, dbody = await _get(session, d, proxy)
                     await sink.send(d, dmeta["status"], dmeta.get("final"), dbody, dmeta.get("ctype"), linked_from=[url])
                     docs += 1
         await asyncio.sleep(gap)
     return {"host": host, "pages": pages, "documents": docs}
 
 
-async def _get(session, url):
+async def _get(session, url, proxy=None):
     try:
-        async with session.get(url, allow_redirects=True) as r:
+        async with session.get(url, allow_redirects=True, proxy=proxy) as r:
             body = await r.content.read(50 * 1024 * 1024)   # 50 MB cap per object
             return {"status": r.status, "final": str(r.url), "ctype": r.headers.get("Content-Type")}, body
     except Exception as e:  # noqa: BLE001
