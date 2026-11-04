@@ -13,8 +13,12 @@ DOC_EXT = (".pdf", ".xls", ".xlsx", ".csv", ".doc", ".docx", ".ppt", ".pptx", ".
 
 
 def main(src):
-    files = sorted(Path(src).glob("*.jsonl"))
+    src = Path(src)
+    manifest = src / ".imported"
+    done = set(manifest.read_text().splitlines()) if manifest.exists() else set()
+    files = [f for f in sorted(src.glob("*.jsonl")) if f.name not in done]   # each host's jsonl imported once
     caps = blobs = docs = 0
+    newly = []
     with db.conn() as c:
         for fp in files:
             for line in fp.read_text().splitlines():
@@ -42,7 +46,11 @@ def main(src):
                           (r["url"], host, r.get("vantage", "IN"), r.get("http_status"), r.get("final_url"),
                            sha, r.get("content_type"), is_doc, r.get("run_id")))
                 caps += 1
+            newly.append(fp.name)
         c.commit()
+    with open(manifest, "a") as m:
+        for name in newly:
+            m.write(name + "\n")
     print(f"imported {caps} captures, {blobs} blob rows, {docs} documents from {len(files)} hosts")
 
 
