@@ -77,11 +77,16 @@ def _meta_rows(c, b):
     host = _host(b.get("final_url") or url)
     is_doc = _is_document(b.get("final_url") or url, ct)
     if sha:
-        c.execute("""INSERT INTO blob (sha256, size, content_type, b2_key, text_sha, text_chars)
-                     VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (sha256) DO UPDATE SET
+        txt = b.get("text") or ""
+        # build the full-text index here (batched, so cheap): new captures are searchable at once, and a re-captured blob
+        # whose row had a null tsv gets filled. 'simple' config = multilingual. No text -> tsv stays null.
+        c.execute("""INSERT INTO blob (sha256, size, content_type, b2_key, text_sha, text_chars, tsv)
+                     VALUES (%s,%s,%s,%s,%s,%s, CASE WHEN %s <> '' THEN to_tsvector('simple', left(%s, 600000)) END)
+                     ON CONFLICT (sha256) DO UPDATE SET
                        text_sha = COALESCE(blob.text_sha, EXCLUDED.text_sha),
-                       text_chars = COALESCE(blob.text_chars, EXCLUDED.text_chars)""",
-                  (sha, b.get("size", 0), ct, store.blob_key(sha), b.get("text_sha"), b.get("text_chars", 0)))
+                       text_chars = COALESCE(blob.text_chars, EXCLUDED.text_chars),
+                       tsv = COALESCE(blob.tsv, EXCLUDED.tsv)""",
+                  (sha, b.get("size", 0), ct, store.blob_key(sha), b.get("text_sha"), b.get("text_chars", 0), txt, txt))
         if is_doc:
             m = DOC_EXT.search(url)
             c.execute("""INSERT INTO document (content_sha, ext, linked_from) VALUES (%s,%s,%s)

@@ -106,8 +106,10 @@ class Sink:
             sha = store.sha256(content)
             txt = text.extract(content, content_type, url)
             tsha = store.sha256(txt.encode("utf-8", "replace")) if txt else None
-            # text itself is uploaded to B2 (below), not POSTed — the ingest no longer computes tsv inline (async backfill does)
-            meta.update(content_sha=sha, size=len(content), text_sha=tsha, text_chars=(len(txt) if txt else 0))
+            # text goes to B2 (below) AND in the batch (capped) so the ingest builds the search index at capture time —
+            # cheap now that writes are batched, and it keeps search current without a slow from-B2 backfill
+            meta.update(content_sha=sha, size=len(content), text_sha=tsha, text_chars=(len(txt) if txt else 0),
+                        text=(txt[:600000] if txt else None))
             prep = self._api_post("/blob/prepare", {"content_sha": sha, "text_sha": tsha})
             if prep.get("raw_url"):
                 self._b2_put(prep["raw_url"], content)
