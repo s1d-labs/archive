@@ -167,8 +167,12 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
 async def _get(session, url, proxy=None):
     try:
         async with session.get(url, allow_redirects=True, proxy=proxy) as r:
-            body = await r.content.read(50 * 1024 * 1024)   # 50 MB cap per object
-            return {"status": r.status, "final": str(r.url), "ctype": r.headers.get("Content-Type")}, body
+            buf = bytearray()                               # read the WHOLE body: content.read(n) returns only the first
+            async for chunk in r.content.iter_chunked(1 << 16):  # chunk, which truncated larger PDFs/pages
+                buf += chunk
+                if len(buf) > 50 * 1024 * 1024:             # 50 MB cap per object
+                    break
+            return {"status": r.status, "final": str(r.url), "ctype": r.headers.get("Content-Type")}, bytes(buf)
     except Exception as e:  # noqa: BLE001
         return {"status": 0, "final": url, "ctype": None, "err": type(e).__name__}, None
 
