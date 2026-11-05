@@ -31,11 +31,14 @@ def main():
                 break                                # nothing left for this project: exit, the worker asks for more
             item = items[0]
             url = item["payload"]["url"]
-            sink = capture.Sink("http", api=API, token=TOKEN, run_id=run_id, vantage=VANTAGE)
 
             async def go():
-                res = await capture.run([url], sink, max_pages=MAX_PAGES)
-                await sink.close()
+                # the http sink opens an aiohttp ClientSession, which must be created inside a running event loop
+                sink = capture.Sink("http", api=API, token=TOKEN, run_id=run_id, vantage=VANTAGE)
+                try:
+                    res = await capture.run([url], sink, max_pages=MAX_PAGES)
+                finally:
+                    await sink.close()
                 return res[0]
 
             try:
