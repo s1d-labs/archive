@@ -31,14 +31,16 @@ def main(workers=12):
             if txt:
                 buf.append((txt, sha))
             if len(buf) >= 100:
-                c.executemany(UPDATE, buf)
+                for args in buf:
+                    c.execute(UPDATE, args)
                 c.commit()
                 idx += len(buf)
                 buf = []
             if seen % 5000 == 0:
                 print(f"{seen}/{len(shas)} indexed={idx}", flush=True)
         if buf:
-            c.executemany(UPDATE, buf)
+            for args in buf:
+                c.execute(UPDATE, args)
             c.commit()
             idx += len(buf)
     print(f"done: {seen} seen, {idx} indexed", flush=True)
