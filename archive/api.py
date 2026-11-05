@@ -10,11 +10,41 @@ Run: uvicorn archive.api:app (via the archive-index.service unit).
 import os
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 
 from . import db, ingest
 
 app = FastAPI(title="archive ingest")
 TOKEN = None
+
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    """Public progress page. Aggregate counts only — the archived data itself is team-gated (token on /ingest, /stats)."""
+    with db.conn() as c:
+        hosts = c.execute("SELECT count(DISTINCT host) n FROM capture").fetchone()["n"]
+        cap = c.execute("SELECT count(*) n FROM capture").fetchone()["n"]
+        docs = c.execute("SELECT count(*) n FROM capture WHERE is_document").fetchone()["n"]
+        bl = c.execute("SELECT count(*) n, coalesce(sum(size),0) b, count(*) FILTER (WHERE text_chars>0) t FROM blob").fetchone()
+        hr = c.execute("SELECT count(*) n FROM capture WHERE fetched_at > now()-interval '1 hour'").fetchone()["n"]
+        van = c.execute("SELECT coalesce(vantage,'?') v, count(DISTINCT host) h FROM capture GROUP BY 1 ORDER BY 2 DESC LIMIT 6").fetchall()
+    gb = int(bl["b"]) / 1e9
+    rows = "".join(f"<tr><td>{r['v']}</td><td>{r['h']:,}</td></tr>" for r in van)
+    def big(n, lbl):
+        return f'<div class=c><div class=n>{n}</div><div class=l>{lbl}</div></div>'
+    return f"""<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>archive.s1d.me</title>
+<meta http-equiv=refresh content=60>
+<style>:root{{color-scheme:dark}}body{{background:#0b0d10;color:#e6e8eb;font:15px/1.5 ui-sans-serif,system-ui,sans-serif;
+margin:0;padding:48px 20px;max-width:860px;margin:0 auto}}h1{{font-size:22px;font-weight:650;letter-spacing:-.01em;margin:0 0 4px}}
+.sub{{color:#8a9099;margin:0 0 36px;font-size:14px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:36px}}
+.c{{background:#14181d;border:1px solid #222830;border-radius:12px;padding:18px 20px}}.n{{font-size:28px;font-weight:650;letter-spacing:-.02em}}
+.l{{color:#8a9099;font-size:13px;margin-top:3px}}table{{border-collapse:collapse;width:100%;font-size:14px}}td{{padding:7px 10px;border-bottom:1px solid #1c2127}}
+td:last-child{{text-align:right;color:#8a9099;font-variant-numeric:tabular-nums}}.foot{{color:#555b63;font-size:12px;margin-top:32px}}a{{color:#6ea8fe}}</style></head>
+<body><h1>archive.s1d.me</h1><p class=sub>A content-addressed, versioned archive of the Indian republic&rsquo;s public government web. Capture everything; understand it in layers.</p>
+<div class=grid>{big(f'{hosts:,}','hosts touched')}{big(f'{cap:,}','captures')}{big(f'{gb:,.1f} GB','raw data')}{big(f'{docs:,}','documents')}{big(f'{bl["t"]:,}','with searchable text')}{big(f'{hr:,}','captures / last hour')}</div>
+<table><thead><tr><td>vantage</td><td>hosts</td></tr></thead><tbody>{rows}</tbody></table>
+<p class=foot>Aggregate progress only. The archived data is private (team-gated). Refreshes every 60s.</p></body></html>"""
 
 
 def _token():
