@@ -70,6 +70,8 @@ class Sink:
                 "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from,
                 "body_b64": base64.b64encode(content).decode() if content is not None else None}
         async with self._s.post(f"{self.api}/ingest", json=body) as r:
+            if r.status >= 300:                      # fail loudly so a bad ingest is retried, never silently dropped
+                raise RuntimeError(f"ingest {r.status}: {(await r.text())[:120]}")
             return await r.json()
 
     def _to_b2(self, url, status, final_url, content, content_type, linked_from):
