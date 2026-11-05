@@ -168,10 +168,23 @@ async def _get(session, url, proxy=None):
     try:
         async with session.get(url, allow_redirects=True, proxy=proxy) as r:
             buf = bytearray()                               # read the WHOLE body: content.read(n) returns only the first
+            capped = False
             async for chunk in r.content.iter_chunked(1 << 16):  # chunk, which truncated larger PDFs/pages
                 buf += chunk
                 if len(buf) > 50 * 1024 * 1024:             # 50 MB cap per object
+                    capped = True
                     break
+            # integrity guard: an uncompressed body shorter than the server's declared length = an incomplete read (dropped
+            # connection). Don't store a truncated blob — report it as a failed fetch so it is retried, not silently kept.
+            clen = r.headers.get("Content-Length")
+            enc = (r.headers.get("Content-Encoding") or "").lower()
+            if clen and not enc and not capped:
+                try:
+                    if len(buf) < int(clen):
+                        return {"status": 0, "final": str(r.url), "ctype": r.headers.get("Content-Type"),
+                                "err": f"truncated {len(buf)}/{int(clen)}"}, None
+                except ValueError:
+                    pass
             return {"status": r.status, "final": str(r.url), "ctype": r.headers.get("Content-Type")}, bytes(buf)
     except Exception as e:  # noqa: BLE001
         return {"status": 0, "final": url, "ctype": None, "err": type(e).__name__}, None

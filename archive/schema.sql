@@ -11,8 +11,17 @@ CREATE TABLE IF NOT EXISTS blob (
     stored_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     text_sha      TEXT,                             -- sha of extracted text (null until parsed); text itself in blob too
     text_chars    INT,                              -- length of extracted text, null until parsed
-    ocr           BOOLEAN NOT NULL DEFAULT false    -- text came from OCR (scanned PDF)
+    ocr           BOOLEAN NOT NULL DEFAULT false,   -- text came from OCR (scanned PDF)
+    tsv           TSVECTOR                          -- full-text index of the extracted text ('simple' config; multilingual)
 );
+CREATE INDEX IF NOT EXISTS blob_tsv_gin ON blob USING GIN (tsv);
+
+-- Search the captured corpus: every URL where a matching blob appeared, newest first.
+--   SELECT url, host, fetched_at FROM search WHERE tsv @@ websearch_to_tsquery('simple', 'land acquisition') ORDER BY fetched_at DESC;
+CREATE OR REPLACE VIEW search AS
+  SELECT c.url, c.host, c.fetched_at, c.is_document, b.content_type, b.text_chars, b.sha256 AS content_sha, b.tsv
+    FROM capture c JOIN blob b ON c.content_sha = b.sha256
+   WHERE b.tsv IS NOT NULL;
 
 -- The provenance log: one row per fetch, never mutated or deleted. Re-crawls append new rows; identical content reuses
 -- the blob, so a row with the same (url, content_sha) as the previous one means "unchanged at this time".
@@ -42,7 +51,8 @@ CREATE TABLE IF NOT EXISTS document (
     content_sha   TEXT PRIMARY KEY REFERENCES blob(sha256),
     first_seen    TIMESTAMPTZ NOT NULL DEFAULT now(),
     ext           TEXT,                             -- pdf/xlsx/csv/…
-    linked_from   JSONB NOT NULL DEFAULT '[]'       -- sample of capture ids / page urls that referenced it
+    linked_from   JSONB NOT NULL DEFAULT '[]',      -- sample of capture ids / page urls that referenced it
+    ok            BOOLEAN                           -- integrity check (archive.validate): null=unchecked, true=complete, false=truncated/corrupt
 );
 
 -- The structured layer: normalized rows parsed from captures by per-source enrichers (Phase 4). One shape for all sources.
