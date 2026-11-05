@@ -69,6 +69,19 @@ def put_url(key: str, expires: int = 3600) -> str:
     return s3.generate_presigned_url("put_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=expires)
 
 
+def get_url(key: str, content_type: str = None, filename: str = None, expires: int = 3600, inline: bool = True) -> str:
+    """A presigned S3 GET URL for `key` — a time-limited direct-from-B2 download, so retrievals don't transit dev-vps-2."""
+    s3, bucket = _s3()
+    params = {"Bucket": bucket, "Key": key}
+    disp = "inline" if inline else "attachment"
+    if filename:
+        disp += f'; filename="{filename}"'
+    params["ResponseContentDisposition"] = disp
+    if content_type:
+        params["ResponseContentType"] = content_type
+    return s3.generate_presigned_url("get_object", Params=params, ExpiresIn=expires)
+
+
 def get_blob(sha: str) -> bytes:
     s3, bucket = _s3()
     return s3.get_object(Bucket=bucket, Key=blob_key(sha))["Body"].read()

@@ -11,7 +11,7 @@ import asyncio
 import os
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from . import db, ingest
 
@@ -103,6 +103,66 @@ async def ingest_batch(request: Request):
     scale path that lets worker count rise without dev-vps-2 write-contention. Body: {items: [ {url, content_sha, ...}, ... ]}."""
     b = await request.json()
     return await asyncio.to_thread(ingest.ingest_meta_batch, b.get("items") or [])
+
+
+def _authed(request: Request, k: str) -> bool:
+    want = _token()
+    return bool(want) and (request.headers.get("authorization", "") == f"Bearer {want}" or k == want)
+
+
+@app.get("/get")
+async def get_one(request: Request, url: str, k: str = "", dl: int = 0):
+    """Retrieve an archived page/document by its ORIGINAL url (structure preserved — the url is the key). Returns the
+    latest capture, as a time-limited direct-from-B2 link. Token via header or ?k=. ?dl=1 forces download over inline."""
+    if not _authed(request, k):
+        raise HTTPException(401, "bad or missing token")
+    import os.path
+    from . import store
+    with db.conn() as c:
+        row = c.execute("""SELECT b.b2_key, b.content_type FROM capture c JOIN blob b ON c.content_sha = b.sha256
+                           WHERE c.url = %s AND c.content_sha IS NOT NULL ORDER BY c.fetched_at DESC LIMIT 1""",
+                        (url,)).fetchone()
+    if not row:
+        raise HTTPException(404, "not archived (try the exact captured url, or /host to browse)")
+    fn = os.path.basename(url.split("?")[0]) or "download"
+    link = await asyncio.to_thread(store.get_url, row["b2_key"], row["content_type"], fn, 3600, not dl)
+    return RedirectResponse(link)
+
+
+@app.get("/search")
+async def search_corpus(request: Request, q: str, k: str = "", host: str = "", limit: int = 50):
+    """Full-text search across the captured corpus. Results carry each hit's original url/host/path, so the site structure
+    is preserved in the answer. Optional host= filter. Needs the fts backfill to have indexed the text (blob.tsv)."""
+    if not _authed(request, k):
+        raise HTTPException(401, "bad or missing token")
+    limit = min(max(1, limit), 200)
+    sql = "SELECT url, host, fetched_at, content_type, is_document FROM search WHERE tsv @@ websearch_to_tsquery('simple', %s)"
+    args = [q]
+    if host:
+        sql += " AND host = %s"
+        args.append(host)
+    sql += " ORDER BY fetched_at DESC LIMIT %s"
+    args.append(limit)
+    with db.conn() as c:
+        rows = c.execute(sql, tuple(args)).fetchall()
+    return {"q": q, "count": len(rows),
+            "results": [{"url": r["url"], "host": r["host"], "is_document": r["is_document"],
+                         "content_type": r["content_type"], "fetched_at": r["fetched_at"].isoformat()} for r in rows]}
+
+
+@app.get("/host")
+async def host_browse(request: Request, host: str, k: str = "", limit: int = 200):
+    """Browse what's archived for one host, newest first — the original url paths, so the site's structure is navigable."""
+    if not _authed(request, k):
+        raise HTTPException(401, "bad or missing token")
+    limit = min(max(1, limit), 1000)
+    with db.conn() as c:
+        rows = c.execute("""SELECT DISTINCT ON (url) url, content_type, is_document, fetched_at FROM capture
+                            WHERE host = %s AND content_sha IS NOT NULL ORDER BY url, fetched_at DESC LIMIT %s""",
+                         (host, limit)).fetchall()
+    return {"host": host, "count": len(rows),
+            "urls": [{"url": r["url"], "is_document": r["is_document"], "content_type": r["content_type"],
+                      "fetched_at": r["fetched_at"].isoformat()} for r in rows]}
 
 
 @app.post("/blob/prepare", dependencies=[Depends(auth)])
