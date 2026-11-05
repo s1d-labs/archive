@@ -29,7 +29,7 @@ def main(workers=12):
         for sha, txt in ex.map(fetch, shas, chunksize=8):
             seen += 1
             if txt:
-                buf.append((txt, sha))
+                buf.append((txt.replace("\x00", ""), sha))   # Postgres text can't hold NUL bytes; strip for the index
             if len(buf) >= 100:
                 for args in buf:
                     c.execute(UPDATE, args)

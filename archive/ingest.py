@@ -77,7 +77,7 @@ def _meta_rows(c, b):
     host = _host(b.get("final_url") or url)
     is_doc = _is_document(b.get("final_url") or url, ct)
     if sha:
-        txt = b.get("text") or ""
+        txt = (b.get("text") or "").replace("\x00", "")   # NULs are legal in extracted text but Postgres text/tsvector rejects them
         # build the full-text index here (batched, so cheap): new captures are searchable at once, and a re-captured blob
         # whose row had a null tsv gets filled. 'simple' config = multilingual. No text -> tsv stays null.
         c.execute("""INSERT INTO blob (sha256, size, content_type, b2_key, text_sha, text_chars, tsv)
