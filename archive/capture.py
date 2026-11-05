@@ -66,6 +66,8 @@ class Sink:
                                            http_status=status, final_url=final_url, run_id=self.run_id, linked_from=linked_from)
         if self.mode == "b2":
             return await asyncio.to_thread(self._to_b2, url, status, final_url, content, content_type, linked_from)
+        if self.mode == "direct":
+            return await asyncio.to_thread(self._direct, url, status, final_url, content, content_type, linked_from)
         body = {"url": url, "http_status": status, "final_url": final_url, "content_type": content_type,
                 "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from,
                 "body_b64": base64.b64encode(content).decode() if content is not None else None}
@@ -73,6 +75,43 @@ class Sink:
             if r.status >= 300:                      # fail loudly so a bad ingest is retried, never silently dropped
                 raise RuntimeError(f"ingest {r.status}: {(await r.text())[:120]}")
             return await r.json()
+
+    def _api_post(self, path, body):
+        """POST JSON to the ingest API (token + UA; the UA matters — Cloudflare 403s the default urllib UA, error 1010)."""
+        import urllib.request
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(f"{self.api}{path}", data=data, headers={
+            "Authorization": f"Bearer {self.token}", "Content-Type": "application/json",
+            "User-Agent": "archive-pool/1.0 (+https://archive.s1d.me)"})
+        with urllib.request.urlopen(req, timeout=90) as r:
+            return json.loads(r.read())
+
+    def _b2_put(self, url, data):
+        """Upload bytes straight to B2 via a presigned PUT URL (no B2 credential on this worker)."""
+        import urllib.request
+        req = urllib.request.Request(url, data=data, method="PUT")
+        with urllib.request.urlopen(req, timeout=180) as r:
+            return r.status
+
+    def _direct(self, url, status, final_url, content, content_type, linked_from):
+        """Scale path: hash + extract here, upload the blob (and text) straight to B2 via presigned URLs, then report
+        only metadata + text to the ingest API. dev-vps-2 never touches the bytes, so the pool can run many workers."""
+        from . import store, text
+        meta = {"url": url, "http_status": status, "final_url": final_url, "content_type": content_type,
+                "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from,
+                "content_sha": None, "size": 0, "text_sha": None, "text_chars": 0, "text": None}
+        if content is not None:
+            sha = store.sha256(content)
+            txt = text.extract(content, content_type, url)
+            tsha = store.sha256(txt.encode("utf-8", "replace")) if txt else None
+            meta.update(content_sha=sha, size=len(content), text_sha=tsha,
+                        text_chars=(len(txt) if txt else 0), text=(txt[:900000] if txt else None))
+            prep = self._api_post("/blob/prepare", {"content_sha": sha, "text_sha": tsha})
+            if prep.get("raw_url"):
+                self._b2_put(prep["raw_url"], content)
+            if txt and prep.get("txt_url"):
+                self._b2_put(prep["txt_url"], txt.encode("utf-8", "replace"))
+        return self._api_post("/ingest", meta)
 
     def _to_b2(self, url, status, final_url, content, content_type, linked_from):
         from . import store, text

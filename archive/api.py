@@ -7,6 +7,7 @@ capture. Token-authenticated. Loopback / tunnel only. FastAPI, matching scrape-h
   GET  /stats
 Run: uvicorn archive.api:app (via the archive-index.service unit).
 """
+import asyncio
 import os
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -82,21 +83,34 @@ async def ingest_one(request: Request):
     import base64
     b = await request.json()
     content = base64.b64decode(b["body_b64"]) if b.get("body_b64") is not None else None
-    if content is None and b.get("content_sha"):
-        # the worker already stored the blob; record the capture against it (no re-upload, no re-extract here)
-        with db.conn() as c:
-            cap = c.execute("""INSERT INTO capture (url, host, fetched_at, vantage, http_status, final_url, content_sha,
-                                 content_type, is_document, headers, robots_ok, run_id)
-                               VALUES (%(url)s,%(host)s, now(), %(vantage)s, %(status)s, %(final)s, %(sha)s, %(ct)s,
-                                 %(doc)s, %(hdr)s::jsonb, %(rok)s, %(run)s) RETURNING id""",
-                            {"url": b["url"], "host": (b["url"].split("/")[2] if "//" in b["url"] else ""),
-                             "vantage": b.get("vantage", "pool"), "status": b.get("http_status"), "final": b.get("final_url"),
-                             "sha": b["content_sha"], "ct": b.get("content_type"), "doc": b.get("is_document", False),
-                             "hdr": __import__("json").dumps(b.get("headers") or {}), "rok": b.get("robots_ok"),
-                             "run": b.get("run_id")}).fetchone()
-            c.commit()
-        return {"capture_id": cap["id"], "sha256": b["content_sha"], "newly_stored": False}
+    if content is None:
+        # scale path: the worker already uploaded the blob + text to B2 (presigned); we only write rows + tsv here
+        return await asyncio.to_thread(
+            ingest.ingest_meta, b["url"], content_sha=b.get("content_sha"), size=b.get("size", 0),
+            content_type=b.get("content_type"), text=b.get("text"), text_sha=b.get("text_sha"),
+            text_chars=b.get("text_chars", 0), http_status=b.get("http_status", 200), final_url=b.get("final_url"),
+            headers=b.get("headers"), robots_ok=b.get("robots_ok"), run_id=b.get("run_id"),
+            vantage=b.get("vantage", "pool"), linked_from=b.get("linked_from"), fetched_at=b.get("fetched_at"))
     return ingest.ingest(b["url"], content, content_type=b.get("content_type"), fetched_at=b.get("fetched_at"),
                          vantage=b.get("vantage", "pool"), http_status=b.get("http_status", 200),
                          final_url=b.get("final_url"), headers=b.get("headers"), robots_ok=b.get("robots_ok"),
                          run_id=b.get("run_id"), linked_from=b.get("linked_from"))
+
+
+@app.post("/blob/prepare", dependencies=[Depends(auth)])
+async def blob_prepare(request: Request):
+    """A pool worker asks which parts it must upload before reporting a capture. Returns presigned PUT URLs for the raw
+    blob and/or its text, or null for parts already in the store (dedup by the blob index). Keeps B2 creds off the runner."""
+    from . import store
+    b = await request.json()
+    sha = b.get("content_sha")
+    out = {"raw_url": None, "txt_url": None}
+    row = None
+    if sha:
+        with db.conn() as c:
+            row = c.execute("SELECT text_sha FROM blob WHERE sha256=%s", (sha,)).fetchone()
+        if not row:
+            out["raw_url"] = await asyncio.to_thread(store.put_url, store.blob_key(sha))
+        if b.get("text_sha") and (not row or not row.get("text_sha")):
+            out["txt_url"] = await asyncio.to_thread(store.put_url, store.text_key(sha))
+    return out

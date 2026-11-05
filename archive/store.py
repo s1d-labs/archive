@@ -62,6 +62,13 @@ def put_text(sha: str, text: str) -> str:
     return key
 
 
+def put_url(key: str, expires: int = 3600) -> str:
+    """A presigned S3 PUT URL for `key`, so a pool worker can upload a blob straight to B2 with no B2 credential of its
+    own (the bytes never transit dev-vps-2). ContentType is left unsigned, so the worker may PUT with any/no content type."""
+    s3, bucket = _s3(write=True)
+    return s3.generate_presigned_url("put_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=expires)
+
+
 def get_blob(sha: str) -> bytes:
     s3, bucket = _s3()
     return s3.get_object(Bucket=bucket, Key=blob_key(sha))["Body"].read()

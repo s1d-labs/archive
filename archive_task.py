@@ -33,8 +33,8 @@ def main():
             url = item["payload"]["url"]
 
             async def go():
-                # the http sink opens an aiohttp ClientSession, which must be created inside a running event loop
-                sink = capture.Sink("http", api=API, token=TOKEN, run_id=run_id, vantage=VANTAGE)
+                # direct sink: upload blob + text straight to B2 (presigned), report only metadata — dev-vps-2 is off the byte path
+                sink = capture.Sink("direct", api=API, token=TOKEN, run_id=run_id, vantage=VANTAGE)
                 try:
                     res = await capture.run([url], sink, max_pages=MAX_PAGES)
                 finally:
