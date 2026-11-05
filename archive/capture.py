@@ -53,7 +53,9 @@ class Sink:
         self.mode, self.api, self.token, self.run_id, self.vantage = mode, api, token, run_id, vantage
         if mode == "http":
             import aiohttp
-            self._s = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"})
+            # An explicit UA: Cloudflare's Browser Integrity Check 403s the default aiohttp/urllib UA (error 1010).
+            self._s = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}",
+                                                     "User-Agent": "archive-pool/1.0 (+https://archive.s1d.me)"})
         elif mode == "b2":
             self._f = open(jsonl, "a")
 
