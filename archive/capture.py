@@ -58,6 +58,8 @@ class Sink:
                                                      "User-Agent": "archive-pool/1.0 (+https://archive.s1d.me)"})
         elif mode == "b2":
             self._f = open(jsonl, "a")
+        elif mode == "direct":
+            self._buf = []                            # metadata buffered, flushed to /ingest/batch in groups (see _direct)
 
     async def send(self, url, status, final_url, content, content_type, linked_from=None):
         if self.mode == "local":
@@ -111,7 +113,15 @@ class Sink:
                 self._b2_put(prep["raw_url"], content)
             if txt and prep.get("txt_url"):
                 self._b2_put(prep["txt_url"], txt.encode("utf-8", "replace"))
-        return self._api_post("/ingest", meta)
+        self._buf.append(meta)                        # batch the index write: one DB txn per ~25 captures, not per capture
+        if len(self._buf) >= 25:
+            self._flush()
+        return {"buffered": len(self._buf)}
+
+    def _flush(self):
+        if self._buf:
+            self._api_post("/ingest/batch", {"items": self._buf})
+            self._buf = []
 
     def _to_b2(self, url, status, final_url, content, content_type, linked_from):
         from . import store, text
@@ -134,6 +144,8 @@ class Sink:
             await self._s.close()
         elif self.mode == "b2":
             self._f.close()
+        elif self.mode == "direct":
+            await asyncio.to_thread(self._flush)      # write any captures still buffered for this host
 
 
 async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000, gap=GAP_S, proxy=None):

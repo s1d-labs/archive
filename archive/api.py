@@ -97,6 +97,14 @@ async def ingest_one(request: Request):
                          run_id=b.get("run_id"), linked_from=b.get("linked_from"))
 
 
+@app.post("/ingest/batch", dependencies=[Depends(auth)])
+async def ingest_batch(request: Request):
+    """Many already-uploaded captures in one call (blobs already PUT to B2). One DB transaction for the whole batch — the
+    scale path that lets worker count rise without dev-vps-2 write-contention. Body: {items: [ {url, content_sha, ...}, ... ]}."""
+    b = await request.json()
+    return await asyncio.to_thread(ingest.ingest_meta_batch, b.get("items") or [])
+
+
 @app.post("/blob/prepare", dependencies=[Depends(auth)])
 async def blob_prepare(request: Request):
     """A pool worker asks which parts it must upload before reporting a capture. Returns presigned PUT URLs for the raw

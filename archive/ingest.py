@@ -64,35 +64,49 @@ def ingest(url, content, content_type=None, fetched_at=None, vantage="dev-vps-2"
             "text_chars": tkey_chars, "host": host}
 
 
-def ingest_meta(url, content_sha=None, size=0, content_type=None, text=None, text_sha=None, text_chars=0,
-                http_status=200, final_url=None, headers=None, robots_ok=None, run_id=None, vantage="pool",
-                linked_from=None, fetched_at=None):
-    """Record a capture whose blob (and extracted text) a pool worker already uploaded to B2 via a presigned URL.
-    Writes the blob/document/capture rows and the tsvector only — no bytes, no B2 upload, no text extraction here.
-    This is the scale path: the heavy work (upload + extraction) happens on the worker, dev-vps-2 only indexes."""
-    fetched_at = fetched_at or datetime.now(timezone.utc)
+def _meta_rows(c, b):
+    """Write the blob/document/capture rows for one already-uploaded capture, on cursor `c` (no commit). `b` is a dict.
+    tsv is NOT computed here (heaviest per-request CPU) — fts_backfill builds it from the text in B2. Plain inserts only,
+    so many pool workers can report captures without overloading dev-vps-2."""
+    url = b["url"]
+    fetched_at = b.get("fetched_at") or datetime.now(timezone.utc)
     if isinstance(fetched_at, str):
         fetched_at = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
-    host = _host(final_url or url)
-    is_doc = _is_document(final_url or url, content_type)
+    sha = b.get("content_sha")
+    ct = b.get("content_type")
+    host = _host(b.get("final_url") or url)
+    is_doc = _is_document(b.get("final_url") or url, ct)
+    if sha:
+        c.execute("""INSERT INTO blob (sha256, size, content_type, b2_key, text_sha, text_chars)
+                     VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (sha256) DO UPDATE SET
+                       text_sha = COALESCE(blob.text_sha, EXCLUDED.text_sha),
+                       text_chars = COALESCE(blob.text_chars, EXCLUDED.text_chars)""",
+                  (sha, b.get("size", 0), ct, store.blob_key(sha), b.get("text_sha"), b.get("text_chars", 0)))
+        if is_doc:
+            m = DOC_EXT.search(url)
+            c.execute("""INSERT INTO document (content_sha, ext, linked_from) VALUES (%s,%s,%s)
+                         ON CONFLICT (content_sha) DO NOTHING""",
+                      (sha, (m.group(1).lower() if m else None), json.dumps((b.get("linked_from") or [])[:20])))
+    return c.execute("""INSERT INTO capture (url, host, fetched_at, vantage, http_status, final_url, content_sha,
+                          content_type, is_document, headers, robots_ok, run_id)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                     (url, host, fetched_at, b.get("vantage", "pool"), b.get("http_status", 200), b.get("final_url"),
+                      sha, ct, is_doc, json.dumps(b.get("headers") or {}), b.get("robots_ok"), b.get("run_id"))).fetchone()
+
+
+def ingest_meta(url, **kw):
+    """Record one already-uploaded capture (blob+text in B2). Writes rows only — no bytes/B2/extraction here."""
     with db.conn() as c:
-        if content_sha:
-            # tsv is NOT computed here (it is the heaviest per-request CPU) — the async fts_backfill job builds it from the
-            # text already in B2. Keeping ingest to plain row-inserts lets the pool run many workers without overloading dev-vps-2.
-            c.execute("""INSERT INTO blob (sha256, size, content_type, b2_key, text_sha, text_chars)
-                         VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (sha256) DO UPDATE SET
-                           text_sha = COALESCE(blob.text_sha, EXCLUDED.text_sha),
-                           text_chars = COALESCE(blob.text_chars, EXCLUDED.text_chars)""",
-                      (content_sha, size, content_type, store.blob_key(content_sha), text_sha, text_chars))
-            if is_doc:
-                m = DOC_EXT.search(url)
-                c.execute("""INSERT INTO document (content_sha, ext, linked_from) VALUES (%s,%s,%s)
-                             ON CONFLICT (content_sha) DO NOTHING""",
-                          (content_sha, (m.group(1).lower() if m else None), json.dumps((linked_from or [])[:20])))
-        cap = c.execute("""INSERT INTO capture (url, host, fetched_at, vantage, http_status, final_url, content_sha,
-                             content_type, is_document, headers, robots_ok, run_id)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-                        (url, host, fetched_at, vantage, http_status, final_url, content_sha, content_type, is_doc,
-                         json.dumps(headers or {}), robots_ok, run_id)).fetchone()
+        cap = _meta_rows(c, {"url": url, **kw})
         c.commit()
-    return {"capture_id": cap["id"], "sha256": content_sha, "is_document": is_doc, "host": host}
+    return {"capture_id": cap["id"], "sha256": kw.get("content_sha"), "host": _host(kw.get("final_url") or url)}
+
+
+def ingest_meta_batch(items):
+    """Record many already-uploaded captures in ONE transaction — the pool's scale path. One commit per batch instead of
+    one per capture collapses dev-vps-2's write load, so worker count (and thus aggregate download bandwidth) can scale."""
+    with db.conn() as c:
+        for b in items:
+            _meta_rows(c, b)
+        c.commit()
+    return {"ingested": len(items)}
