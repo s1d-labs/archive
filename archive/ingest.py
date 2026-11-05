@@ -77,18 +77,13 @@ def ingest_meta(url, content_sha=None, size=0, content_type=None, text=None, tex
     is_doc = _is_document(final_url or url, content_type)
     with db.conn() as c:
         if content_sha:
-            if text:
-                c.execute("""INSERT INTO blob (sha256, size, content_type, b2_key, text_sha, text_chars, tsv)
-                             VALUES (%s,%s,%s,%s,%s,%s, to_tsvector('simple', left(%s, 900000)))
-                             ON CONFLICT (sha256) DO UPDATE SET
-                               text_sha = COALESCE(blob.text_sha, EXCLUDED.text_sha),
-                               text_chars = COALESCE(blob.text_chars, EXCLUDED.text_chars),
-                               tsv = COALESCE(blob.tsv, EXCLUDED.tsv)""",
-                          (content_sha, size, content_type, store.blob_key(content_sha), text_sha, text_chars, text))
-            else:
-                c.execute("""INSERT INTO blob (sha256, size, content_type, b2_key, text_sha, text_chars)
-                             VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (sha256) DO NOTHING""",
-                          (content_sha, size, content_type, store.blob_key(content_sha), text_sha, text_chars))
+            # tsv is NOT computed here (it is the heaviest per-request CPU) — the async fts_backfill job builds it from the
+            # text already in B2. Keeping ingest to plain row-inserts lets the pool run many workers without overloading dev-vps-2.
+            c.execute("""INSERT INTO blob (sha256, size, content_type, b2_key, text_sha, text_chars)
+                         VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (sha256) DO UPDATE SET
+                           text_sha = COALESCE(blob.text_sha, EXCLUDED.text_sha),
+                           text_chars = COALESCE(blob.text_chars, EXCLUDED.text_chars)""",
+                      (content_sha, size, content_type, store.blob_key(content_sha), text_sha, text_chars))
             if is_doc:
                 m = DOC_EXT.search(url)
                 c.execute("""INSERT INTO document (content_sha, ext, linked_from) VALUES (%s,%s,%s)

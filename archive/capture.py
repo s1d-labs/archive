@@ -99,13 +99,13 @@ class Sink:
         from . import store, text
         meta = {"url": url, "http_status": status, "final_url": final_url, "content_type": content_type,
                 "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from,
-                "content_sha": None, "size": 0, "text_sha": None, "text_chars": 0, "text": None}
+                "content_sha": None, "size": 0, "text_sha": None, "text_chars": 0}
         if content is not None:
             sha = store.sha256(content)
             txt = text.extract(content, content_type, url)
             tsha = store.sha256(txt.encode("utf-8", "replace")) if txt else None
-            meta.update(content_sha=sha, size=len(content), text_sha=tsha,
-                        text_chars=(len(txt) if txt else 0), text=(txt[:900000] if txt else None))
+            # text itself is uploaded to B2 (below), not POSTed — the ingest no longer computes tsv inline (async backfill does)
+            meta.update(content_sha=sha, size=len(content), text_sha=tsha, text_chars=(len(txt) if txt else 0))
             prep = self._api_post("/blob/prepare", {"content_sha": sha, "text_sha": tsha})
             if prep.get("raw_url"):
                 self._b2_put(prep["raw_url"], content)
