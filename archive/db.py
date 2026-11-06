@@ -17,7 +17,18 @@ def conn(statement_timeout=None):
 
 
 def init():
+    """Apply schema.sql. CREATE INDEX IF NOT EXISTS takes its lock before it checks, so on a live table it queued behind
+    a running insert and every new insert queued behind it (ingest stalled). A 5 s lock timeout with retries bounds that."""
+    import time
     sql = (Path(__file__).parent / "schema.sql").read_text()
     with conn() as c:
-        c.execute(sql)
-        c.commit()
+        for attempt in range(30):
+            try:
+                c.execute("SET lock_timeout = '5s'")
+                c.execute(sql)
+                c.commit()
+                return
+            except psycopg.errors.LockNotAvailable:
+                c.rollback()
+                time.sleep(10)
+        raise RuntimeError("schema.sql: could not get its locks in 30 tries")
