@@ -8,8 +8,11 @@ from . import config
 
 
 @contextlib.contextmanager
-def conn():
-    with psycopg.connect(config.DB_URL, autocommit=False, row_factory=psycopg.rows.dict_row) as c:
+def conn(statement_timeout=None):
+    """statement_timeout (e.g. '80s') caps every statement on this connection; the ingest API passes one so a write can
+    never outlive the worker's 90 s request (a GIN cleanup once held a blob row lock for 85 minutes)."""
+    opts = f"-c statement_timeout={statement_timeout}" if statement_timeout else ""
+    with psycopg.connect(config.DB_URL, autocommit=False, row_factory=psycopg.rows.dict_row, options=opts) as c:
         yield c
 
 

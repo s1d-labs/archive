@@ -8,6 +8,8 @@ from urllib.parse import urlsplit
 
 from . import db, store, text
 
+INGEST_TIMEOUT = "80s"   # under the workers' 90 s HTTP timeout: a stuck write fails and frees its locks instead of holding them
+
 DOC_EXT = re.compile(r"\.(pdf|xlsx?|csv|docx?|pptx?|zip|odt|ods|rtf)(\?|$)", re.I)
 
 
@@ -31,7 +33,7 @@ def ingest(url, content, content_type=None, fetched_at=None, vantage="dev-vps-2"
     is_doc = _is_document(final_url or url, content_type)
     sha = tkey_chars = None
     newly = txt = None
-    with db.conn() as c:
+    with db.conn(INGEST_TIMEOUT) as c:
         if content is not None:
             sha, key, newly = store.put_blob(content, content_type)
             row = c.execute("SELECT text_sha FROM blob WHERE sha256=%s", (sha,)).fetchone()
@@ -101,7 +103,7 @@ def _meta_rows(c, b):
 
 def ingest_meta(url, **kw):
     """Record one already-uploaded capture (blob+text in B2). Writes rows only — no bytes/B2/extraction here."""
-    with db.conn() as c:
+    with db.conn(INGEST_TIMEOUT) as c:
         cap = _meta_rows(c, {"url": url, **kw})
         c.commit()
     return {"capture_id": cap["id"], "sha256": kw.get("content_sha"), "host": _host(kw.get("final_url") or url)}
@@ -110,7 +112,7 @@ def ingest_meta(url, **kw):
 def ingest_meta_batch(items):
     """Record many already-uploaded captures in ONE transaction — the pool's scale path. One commit per batch instead of
     one per capture collapses dev-vps-2's write load, so worker count (and thus aggregate download bandwidth) can scale."""
-    with db.conn() as c:
+    with db.conn(INGEST_TIMEOUT) as c:
         for b in items:
             _meta_rows(c, b)
         c.commit()
