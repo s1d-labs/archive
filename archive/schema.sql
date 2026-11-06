@@ -109,3 +109,14 @@ CREATE TABLE IF NOT EXISTS snapshot_diff (
     kind          TEXT,                             -- edited/added/removed
     summary       TEXT
 );
+
+-- Exact identifier / tender references found in a blob's text (archive.refs); the entity graph reads these.
+CREATE TABLE IF NOT EXISTS doc_ref (
+    sha256  TEXT NOT NULL,
+    kind    TEXT NOT NULL,                          -- cin | gstin | pan | din | llpin | tender | gem_bid
+    value   TEXT NOT NULL,
+    n       INT NOT NULL DEFAULT 1,                 -- occurrences in that text
+    PRIMARY KEY (sha256, kind, value)
+);
+CREATE INDEX IF NOT EXISTS doc_ref_value ON doc_ref (kind, value);
+CREATE TABLE IF NOT EXISTS doc_ref_done (sha256 TEXT PRIMARY KEY, at TIMESTAMPTZ NOT NULL DEFAULT now());
