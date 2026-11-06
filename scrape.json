@@ -1,6 +1,6 @@
 {
   "family": "archive",
-  "about": "archive.s1d.me — capture the raw bytes of every page and document of India's public government web, with provenance, into the content-addressed archive. Generic: one task for every host. Reachable hosts run on GitHub runners; India-only hosts run on the geo=\"IN\" India servers.",
+  "about": "archive.s1d.me \u2014 capture the raw bytes of every page and document of India's public government web, with provenance, into the content-addressed archive. Generic: one task for every host. Reachable hosts run on GitHub runners; India-only hosts run on the geo=\"IN\" India servers. Task \"refs\" reads the archived texts on GitHub runners and reports exact identifier and tender references for the entity graph.",
   "setup": [
     "pip install -r requirements.txt"
   ],
@@ -8,6 +8,10 @@
     "capture": [
       "python",
       "archive_task.py"
+    ],
+    "refs": [
+      "python",
+      "refs_task.py"
     ]
   }
 }

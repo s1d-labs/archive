@@ -24,6 +24,12 @@ PATTERNS = {
     "tender": re.compile(r"\b(20\d\d_[A-Z0-9]{2,15}_\d{3,9}_\d{1,3})\b"),
     "gem_bid": re.compile(r"\b(GEM/20\d\d/[BR]/\d{4,9})\b"),
 }
+# The value alone, for checking what a pool worker reports (archive.api /refs/report).
+VALUE = {
+    "cin": PATTERNS["cin"], "gstin": PATTERNS["gstin"], "pan": PATTERNS["pan"],
+    "din": re.compile(r"(\d{8})"), "llpin": re.compile(r"([A-Z]{3}-\d{4})"),
+    "tender": PATTERNS["tender"], "gem_bid": PATTERNS["gem_bid"],
+}
 CAP = 5000                       # refs kept per blob and kind (a contractor list PDF can hold thousands of GSTINs)
 
 

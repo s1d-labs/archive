@@ -63,6 +63,60 @@ def auth(authorization: str = Header(default="")):
         raise HTTPException(401, "bad or missing ingest token")
 
 
+@app.post("/refs/work", dependencies=[Depends(auth)])
+async def refs_work(request: Request):
+    """A pool worker's share of the reference scan (archive.refs): presigned 2-hour links to the extracted texts of the
+    blobs whose sha256 starts with `prefix` and that no scan has read yet. The B2 key never leaves this box.
+    Body: {prefix: 1-6 hex characters}."""
+    import re
+    from . import store
+    b = await request.json()
+    prefix = str(b.get("prefix", ""))
+    if not re.fullmatch(r"[0-9a-f]{1,6}", prefix):
+        raise HTTPException(400, "prefix: 1-6 lowercase hex characters")
+    hi = format(int(prefix, 16) + 1, f"0{len(prefix)}x") if prefix != "f" * len(prefix) else None
+
+    def todo():   # a range, not LIKE: the primary key serves it under any collation
+        with db.conn(ingest.INGEST_TIMEOUT) as c:
+            return [r["sha256"] for r in c.execute(
+                """SELECT b.sha256 FROM blob b WHERE b.sha256 >= %s AND (%s::text IS NULL OR b.sha256 < %s) AND b.text_chars > 0
+                   AND NOT EXISTS (SELECT 1 FROM doc_ref_done d WHERE d.sha256 = b.sha256)""", (prefix, hi, hi)).fetchall()]
+    shas = await asyncio.to_thread(todo)
+    return {"items": [{"sha": s, "url": store.get_url(store.text_key(s), "text/plain; charset=utf-8", None, 7200)} for s in shas]}
+
+
+@app.post("/refs/report", dependencies=[Depends(auth)])
+async def refs_report(request: Request):
+    """What a pool worker found: {items: [{sha, refs: [[kind, value, n], ...]}]}. Every value is checked against its
+    pattern before it is stored, and each sha is marked read (doc_ref_done) even when it holds no reference."""
+    import re
+    from . import refs as R
+    b = await request.json()
+    rows, done = [], []
+    for it in (b.get("items") or [])[:2000]:
+        sha = str(it.get("sha", ""))
+        if not re.fullmatch(r"[0-9a-f]{64}", sha):
+            continue
+        done.append((sha,))
+        for ref in (it.get("refs") or [])[:20000]:
+            try:
+                kind, value, n = str(ref[0]), str(ref[1]), int(ref[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if kind in R.VALUE and len(value) <= 40 and R.VALUE[kind].fullmatch(value):
+                rows.append((sha, kind, value, max(1, n)))
+
+    def store_rows():
+        with db.conn(ingest.INGEST_TIMEOUT) as c, c.cursor() as cur:
+            if rows:
+                cur.executemany("INSERT INTO doc_ref (sha256, kind, value, n) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING", rows)
+            if done:
+                cur.executemany("INSERT INTO doc_ref_done (sha256) VALUES (%s) ON CONFLICT DO NOTHING", done)
+            c.commit()
+    await asyncio.to_thread(store_rows)
+    return {"ok": True, "docs": len(done), "refs": len(rows)}
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True}

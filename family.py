@@ -25,3 +25,9 @@ def targets(path):
         host = line.split("//", 1)[-1].split("/", 1)[0]
         out.append({"key": host, "payload": {"url": line}})
     return out
+
+# The reference scan (task "refs", refs_task.py): one queue item per 3-hex-digit sha256 prefix (4,096 items), GitHub
+# runners only. Registered and seeded from dev-vps-2, NOT by setup_family.py: its env carries the ingest token, and the
+# Setup workflow's set_pool would replace a project's env (it would also drop the token from the capture projects).
+REFS_PROJECT = {"name": "archive-refs", "title": "Archive: identifier and tender references", "task": "refs",
+                "items": [{"key": f"{i:03x}", "payload": {"prefix": f"{i:03x}"}} for i in range(4096)]}
