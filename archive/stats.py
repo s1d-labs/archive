@@ -7,8 +7,6 @@ import time
 
 from . import db
 
-CACHE = "/tmp/archive_stats.json"
-
 
 def compute():
     with db.conn() as c:
@@ -23,11 +21,11 @@ def compute():
 
 def main():
     s = compute()
-    tmp = CACHE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(s, f)
-    import os
-    os.replace(tmp, CACHE)
+    with db.conn() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS stats_cache (id int PRIMARY KEY, data jsonb, at timestamptz DEFAULT now())")
+        c.execute("""INSERT INTO stats_cache (id, data, at) VALUES (1, %s::jsonb, now())
+                     ON CONFLICT (id) DO UPDATE SET data=EXCLUDED.data, at=now()""", (json.dumps(s),))
+        c.commit()
     print("stats:", s, flush=True)
 
 

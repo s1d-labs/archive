@@ -23,11 +23,11 @@ TOKEN = None
 def home():
     """Public progress page. Serves cached aggregate numbers (archive.stats writes them via a timer) so it's instant even
     on a multi-million-row corpus — no live full-table counts here. Data itself is team-gated."""
-    import json as _json
     try:
-        with open("/tmp/archive_stats.json") as f:
-            s = _json.load(f)
-    except Exception:  # noqa: BLE001  cache not warm yet
+        with db.conn() as c:
+            row = c.execute("SELECT data FROM stats_cache WHERE id=1").fetchone()
+        s = (row["data"] if row else {}) or {}
+    except Exception:  # noqa: BLE001  cache table not created yet
         s = {}
     gb = s.get("bytes", 0) / 1e9
 
