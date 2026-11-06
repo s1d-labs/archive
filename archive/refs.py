@@ -10,7 +10,8 @@ Idempotent + resumable: doc_ref_done marks each blob read. Run: python -m archiv
 import re
 import sys
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+import itertools
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from . import db, store
 
@@ -23,7 +24,6 @@ PATTERNS = {
     "tender": re.compile(r"\b(20\d\d_[A-Z0-9]{2,15}_\d{3,9}_\d{1,3})\b"),
     "gem_bid": re.compile(r"\b(GEM/20\d\d/[BR]/\d{4,9})\b"),
 }
-CHUNK = 2000                     # texts per round (B2 round-trips are the limit: run with many readers)
 CAP = 5000                       # refs kept per blob and kind (a contractor list PDF can hold thousands of GSTINs)
 
 
@@ -65,20 +65,28 @@ def main(workers=12):
             c.commit()
             rows, done = [], []
 
-        # Bounded: ex.map queues every task at once, so readers ran ahead of the matcher and filled memory (3 GB in
-        # two minutes). One chunk of texts in flight at a time keeps memory flat.
-        for i in range(0, len(shas), CHUNK):
-            for sha, txt in ex.map(fetch, shas[i:i + CHUNK]):
+        # Sliding window: at most workers*4 texts in flight. ex.map queued every task at once (memory filled in two
+        # minutes), and fixed rounds waited for each round's slowest B2 read, so readers sat idle.
+        it = iter(shas)
+        live = {ex.submit(fetch, sha) for sha in itertools.islice(it, workers * 4)}
+        while live:
+            ready, live = wait(live, return_when=FIRST_COMPLETED)
+            for f in ready:
+                sha, txt = f.result()
                 seen += 1
-                if txt is None:
-                    continue
-                r = refs(txt)
-                found += len(r)
-                rows += [(sha, k, v, n) for k, v, n in r]
-                done.append(sha)
-            flush()
-            if seen % 10000 < CHUNK:
+                if txt is not None:
+                    r = refs(txt)
+                    found += len(r)
+                    rows += [(sha, k, v, n) for k, v, n in r]
+                    done.append(sha)
+                nxt = next(it, None)
+                if nxt is not None:
+                    live.add(ex.submit(fetch, nxt))
+            if len(done) >= 1000:
+                flush()
+            if seen % 20000 < len(ready):
                 print(f"{seen}/{len(shas)} refs={found}", flush=True)
+        flush()
     print(f"done: {seen} read, {found} refs", flush=True)
 
 
