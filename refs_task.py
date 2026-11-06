@@ -4,7 +4,9 @@ Each queue item is a sha256 prefix. The worker asks the archive API for presigne
 (/refs/report). No B2 key on the runner; only the matches travel back to dev-vps-2."""
 import json
 import os
+import random
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -13,7 +15,7 @@ from archive.refs import refs
 PROJECT = os.environ.get("SCRAPE_POOL_PROJECT", "")
 API = os.environ["ARCHIVE_API"]
 TOKEN = os.environ["ARCHIVE_INGEST_TOKEN"]
-READERS = int(os.environ.get("REFS_READERS", "48"))
+READERS = int(os.environ.get("REFS_READERS", "16"))
 DEADLINE = time.time() + float(os.environ.get("SCRAPE_MAX_HOURS", "1")) * 3600 - 300
 UA = "archive-pool/1.0 (+https://archive.s1d.me)"     # Cloudflare 403s the default urllib UA (error 1010)
 
@@ -32,11 +34,19 @@ def api(path, body, timeout=120):
 
 
 def read(item):
-    try:
-        with urllib.request.urlopen(urllib.request.Request(item["url"], headers={"User-Agent": UA}), timeout=60) as r:
-            return item["sha"], refs(r.read().decode("utf-8", "replace"))
-    except Exception:  # noqa: BLE001  missing text: leave it unread, a later run tries again
-        return item["sha"], None
+    # B2 throttles a burst of parallel reads (the first full run lost 1.06M of 1.86M reads, all fine on a retry later):
+    # back off and retry before giving up; an unread text stays for the next run.
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(item["url"], headers={"User-Agent": UA}), timeout=60) as r:
+                return item["sha"], refs(r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return item["sha"], None
+        except Exception:  # noqa: BLE001  timeout, reset: retry
+            pass
+        time.sleep(2 * 2 ** attempt + random.random())
+    return item["sha"], None
 
 
 def main():
