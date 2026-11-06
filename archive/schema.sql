@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS blob (
     tsv           TSVECTOR                          -- full-text index of the extracted text ('simple' config; multilingual)
 );
 CREATE INDEX IF NOT EXISTS blob_tsv_gin ON blob USING GIN (tsv);
+-- Direct GIN updates: with fastupdate on, a busy ingest let the pending-list cleanup run for an hour and block inserts.
+ALTER INDEX blob_tsv_gin SET (fastupdate = off);
 
 -- Search the captured corpus: every URL where a matching blob appeared, newest first.
 --   SELECT url, host, fetched_at FROM search WHERE tsv @@ websearch_to_tsquery('simple', 'land acquisition') ORDER BY fetched_at DESC;
