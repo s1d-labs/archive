@@ -23,6 +23,7 @@ PATTERNS = {
     "tender": re.compile(r"\b(20\d\d_[A-Z0-9]{2,15}_\d{3,9}_\d{1,3})\b"),
     "gem_bid": re.compile(r"\b(GEM/20\d\d/[BR]/\d{4,9})\b"),
 }
+CHUNK = 500                      # texts in flight at once
 CAP = 5000                       # refs kept per blob and kind (a contractor list PDF can hold thousands of GSTINs)
 
 
@@ -64,19 +65,20 @@ def main(workers=12):
             c.commit()
             rows, done = [], []
 
-        for sha, txt in ex.map(fetch, shas, chunksize=8):
-            seen += 1
-            if txt is None:
-                continue
-            r = refs(txt)
-            found += len(r)
-            rows += [(sha, k, v, n) for k, v, n in r]
-            done.append(sha)
-            if len(done) >= 500:
-                flush()
-            if seen % 10000 == 0:
+        # Bounded: ex.map queues every task at once, so readers ran ahead of the matcher and filled memory (3 GB in
+        # two minutes). One chunk of texts in flight at a time keeps memory flat.
+        for i in range(0, len(shas), CHUNK):
+            for sha, txt in ex.map(fetch, shas[i:i + CHUNK]):
+                seen += 1
+                if txt is None:
+                    continue
+                r = refs(txt)
+                found += len(r)
+                rows += [(sha, k, v, n) for k, v, n in r]
+                done.append(sha)
+            flush()
+            if seen % 10000 < CHUNK:
                 print(f"{seen}/{len(shas)} refs={found}", flush=True)
-        flush()
     print(f"done: {seen} read, {found} refs", flush=True)
 
 
