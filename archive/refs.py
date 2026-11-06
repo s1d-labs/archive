@@ -23,7 +23,7 @@ PATTERNS = {
     "tender": re.compile(r"\b(20\d\d_[A-Z0-9]{2,15}_\d{3,9}_\d{1,3})\b"),
     "gem_bid": re.compile(r"\b(GEM/20\d\d/[BR]/\d{4,9})\b"),
 }
-CHUNK = 500                      # texts in flight at once
+CHUNK = 2000                     # texts per round (B2 round-trips are the limit: run with many readers)
 CAP = 5000                       # refs kept per blob and kind (a contractor list PDF can hold thousands of GSTINs)
 
 
