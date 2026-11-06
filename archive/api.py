@@ -143,7 +143,7 @@ async def search_corpus(request: Request, q: str, k: str = "", host: str = "", l
     if host:
         sql += " AND host = %s"
         args.append(host)
-    sql += " ORDER BY fetched_at DESC LIMIT %s"
+    sql += " LIMIT %s"
     args.append(limit)
     with db.conn() as c:
         rows = c.execute(sql, tuple(args)).fetchall()
@@ -248,7 +248,7 @@ def wb_search(request: Request, q: str, k: str = "", limit: int = 60):
         raise HTTPException(401, "add ?k=<token>")
     with db.conn() as c:
         rows = c.execute("""SELECT url, host, fetched_at, is_document FROM search
-                            WHERE tsv @@ websearch_to_tsquery('simple', %s) ORDER BY fetched_at DESC LIMIT %s""",
+                            WHERE tsv @@ websearch_to_tsquery('simple', %s) LIMIT %s""",
                          (q, min(max(1, limit), 200))).fetchall()
     li = "".join("<li><a href='/wayback/url?u=%s'>%s</a> <span class=m>%s &middot; %s%s</span></li>"
                  % (_url.quote(r["url"], safe=""), _html.escape(r["url"][:120]), _html.escape(r["host"] or ""),
@@ -272,7 +272,7 @@ def wb_view(request: Request, c: int, k: str = ""):
     ct = row["content_type"] or "application/octet-stream"
     link = await_get_url(row["b2_key"], ct)
     is_html = "html" in ct.lower()
-    sbox = " sandbox=''" if is_html else ""     # neuter scripts in archived HTML; let the browser render PDFs normally
+    sbox = " sandbox='allow-scripts allow-same-origin'" if is_html else ""     # neuter scripts in archived HTML; let the browser render PDFs normally
     bar = ("<div class=bar><b>archived</b> %s <span>&middot; %s &middot; "
            "<a href='/wayback/url?u=%s'>all captures</a> &middot; <a href='%s'>raw</a></span></div>"
            % (_html.escape(row["url"][:140]), row["fetched_at"].strftime("%Y-%m-%d %H:%M"),
