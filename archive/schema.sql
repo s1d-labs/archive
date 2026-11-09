@@ -132,3 +132,6 @@ CREATE TABLE IF NOT EXISTS frontier (
   done       boolean NOT NULL DEFAULT false,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- documents not yet validated (validate.py daily sweep); new documents are checked right after ingest (2026-11-09)
+CREATE INDEX IF NOT EXISTS document_unchecked ON document (content_sha) WHERE ok IS NULL;

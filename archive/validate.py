@@ -3,8 +3,13 @@ false=truncated/corrupt/missing). Cheap + scalable: for a PDF it range-fetches o
 B2 (no full download) and checks for %PDF ... %%EOF — which is exactly what truncation breaks. Non-PDF documents can't be
 validated this cheaply, so they are left ok=true (present). A nonzero `false` count = captures to re-crawl.
 
+Each new document is checked once, right after it is ingested (api.py hands its sha to check_new, in the background).
+`python -m archive.validate [limit]` is the daily safety sweep for anything that missed that (an API restart mid-check) and,
+at first, the backlog from before checks ran at ingest; the partial index document_unchecked keeps it cheap.
+
   python -m archive.validate [limit]      # limit 0 = every unchecked document
 """
+import concurrent.futures as cf
 import sys
 
 from . import db, store
@@ -28,23 +33,39 @@ def check(sha, content_type):
     return True                                        # non-PDF: present, not cheaply verifiable -> accept
 
 
-def main(limit=0):
-    with db.conn() as c:
-        rows = c.execute("""SELECT d.content_sha, b.content_type FROM document d JOIN blob b ON d.content_sha = b.sha256
-                            WHERE d.ok IS NULL ORDER BY b.stored_at DESC""").fetchall()
-    todo = rows[:limit] if limit else rows
-    print(f"{len(todo)} documents to check", flush=True)
+def _check_rows(rows, label="", workers=8):
+    """Check (sha, content_type) rows in parallel and record the result; returns (good, bad)."""
     good = bad = 0
-    with db.conn() as c:
-        for r in todo:
-            ok = check(r["content_sha"], r["content_type"])
+    with cf.ThreadPoolExecutor(workers) as ex, db.conn() as c:
+        for i, (r, ok) in enumerate(zip(rows, ex.map(lambda r: check(r["content_sha"], r["content_type"]), rows)), 1):
             c.execute("UPDATE document SET ok=%s WHERE content_sha=%s", (ok, r["content_sha"]))
             good += ok
             bad += (not ok)
-            if (good + bad) % 500 == 0:
+            if i % 1000 == 0:
                 c.commit()
-                print(f"{good + bad}/{len(todo)}  ok={good} bad={bad}", flush=True)
+                if label:
+                    print(f"{label}{i}/{len(rows)}  ok={good} bad={bad}", flush=True)
         c.commit()
+    return good, bad
+
+
+def check_new(shas):
+    """Check the not-yet-checked documents among these just-ingested shas (called from the ingest API, in the background)."""
+    shas = [s for s in shas if s]
+    if not shas:
+        return 0, 0
+    with db.conn() as c:
+        rows = c.execute("""SELECT d.content_sha, b.content_type FROM document d JOIN blob b ON d.content_sha = b.sha256
+                            WHERE d.ok IS NULL AND d.content_sha = ANY(%s)""", (shas,)).fetchall()
+    return _check_rows(rows, workers=4) if rows else (0, 0)
+
+
+def main(limit=0):
+    with db.conn() as c:
+        rows = c.execute(f"""SELECT d.content_sha, b.content_type FROM document d JOIN blob b ON d.content_sha = b.sha256
+                             WHERE d.ok IS NULL {"LIMIT %s" % int(limit) if limit else ""}""").fetchall()
+    print(f"{len(rows)} documents to check", flush=True)
+    good, bad = _check_rows(rows, label="", workers=16)
     print(f"done: {good} ok, {bad} bad of {good + bad}", flush=True)
 
 

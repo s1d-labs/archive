@@ -13,7 +13,18 @@ import os
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from . import db, ingest
+import concurrent.futures as _cf
+
+from . import db, ingest, validate
+
+# new documents are validated once, right after ingest, off the request path (validate.check_new); the daily sweep catches misses
+_validator = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="validate")
+
+
+def _validate_later(shas):
+    shas = [s for s in shas if s]
+    if shas:
+        _validator.submit(validate.check_new, shas)
 
 app = FastAPI(title="archive ingest")
 TOKEN = None
@@ -165,16 +176,21 @@ async def ingest_one(request: Request):
     content = base64.b64decode(b["body_b64"]) if b.get("body_b64") is not None else None
     if content is None:
         # scale path: the worker already uploaded the blob + text to B2 (presigned); we only write rows + tsv here
-        return await asyncio.to_thread(
+        out = await asyncio.to_thread(
             ingest.ingest_meta, b["url"], content_sha=b.get("content_sha"), size=b.get("size", 0),
             content_type=b.get("content_type"), text=b.get("text"), text_sha=b.get("text_sha"),
             text_chars=b.get("text_chars", 0), http_status=b.get("http_status", 200), final_url=b.get("final_url"),
             headers=b.get("headers"), robots_ok=b.get("robots_ok"), run_id=b.get("run_id"),
             vantage=b.get("vantage", "pool"), linked_from=b.get("linked_from"), fetched_at=b.get("fetched_at"))
-    return ingest.ingest(b["url"], content, content_type=b.get("content_type"), fetched_at=b.get("fetched_at"),
-                         vantage=b.get("vantage", "pool"), http_status=b.get("http_status", 200),
-                         final_url=b.get("final_url"), headers=b.get("headers"), robots_ok=b.get("robots_ok"),
-                         run_id=b.get("run_id"), linked_from=b.get("linked_from"))
+        _validate_later([b.get("content_sha")])
+        return out
+    out = ingest.ingest(b["url"], content, content_type=b.get("content_type"), fetched_at=b.get("fetched_at"),
+                        vantage=b.get("vantage", "pool"), http_status=b.get("http_status", 200),
+                        final_url=b.get("final_url"), headers=b.get("headers"), robots_ok=b.get("robots_ok"),
+                        run_id=b.get("run_id"), linked_from=b.get("linked_from"))
+    if out.get("is_document"):
+        _validate_later([out.get("sha256")])
+    return out
 
 
 @app.post("/ingest/batch", dependencies=[Depends(auth)])
@@ -182,7 +198,10 @@ async def ingest_batch(request: Request):
     """Many already-uploaded captures in one call (blobs already PUT to B2). One DB transaction for the whole batch — the
     scale path that lets worker count rise without dev-vps-2 write-contention. Body: {items: [ {url, content_sha, ...}, ... ]}."""
     b = await request.json()
-    return await asyncio.to_thread(ingest.ingest_meta_batch, b.get("items") or [])
+    items = b.get("items") or []
+    out = await asyncio.to_thread(ingest.ingest_meta_batch, items)
+    _validate_later([i.get("content_sha") for i in items if isinstance(i, dict)])
+    return out
 
 
 def _authed(request: Request, k: str) -> bool:

@@ -40,3 +40,20 @@ def test_ingest_html_and_pdf_dedup_and_provenance(mods):
         assert blob["size"] == len(html) and blob["text_chars"] and blob["text_chars"] > 0
     assert store.get_blob(r1["sha256"]) == html
     assert "Notices" in store.get_text(r1["sha256"])
+
+
+def test_new_document_is_validated_once_at_ingest(mods):
+    db, ingest, store = mods
+    from archive import validate
+    pdf = (FIX / "sample.pdf").read_bytes()
+    r = ingest.ingest("https://ranchi.nic.in/test/notices/validate-at-ingest.pdf", pdf, content_type="application/pdf",
+                      vantage="dev-vps-2", run_id="pytest")
+    assert r["is_document"]
+    with db.conn() as c:
+        c.execute("UPDATE document SET ok = NULL WHERE content_sha = %s", (r["sha256"],))
+        c.commit()
+    good, bad = validate.check_new([r["sha256"], None])
+    assert (good, bad) == (1, 0)
+    with db.conn() as c:
+        assert c.execute("SELECT ok FROM document WHERE content_sha = %s", (r["sha256"],)).fetchone()["ok"] is True
+    assert validate.check_new([r["sha256"]]) == (0, 0)          # already checked: not fetched again
