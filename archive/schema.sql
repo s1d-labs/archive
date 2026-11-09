@@ -135,3 +135,6 @@ CREATE TABLE IF NOT EXISTS frontier (
 
 -- documents not yet validated (validate.py daily sweep); new documents are checked right after ingest (2026-11-09)
 CREATE INDEX IF NOT EXISTS document_unchecked ON document (content_sha) WHERE ok IS NULL;
+
+-- "captures in the last N minutes" (stats, health checks, the ramp controller): without this every such count read all of capture.
+CREATE INDEX IF NOT EXISTS capture_fetched ON capture (fetched_at);
