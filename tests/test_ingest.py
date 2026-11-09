@@ -50,6 +50,7 @@ def test_new_document_is_validated_once_at_ingest(mods):
                       vantage="dev-vps-2", run_id="pytest")
     assert r["is_document"]
     with db.conn() as c:
+        assert c.execute("SELECT ok FROM document WHERE content_sha = %s", (r["sha256"],)).fetchone()["ok"] is True
         c.execute("UPDATE document SET ok = NULL WHERE content_sha = %s", (r["sha256"],))
         c.commit()
     good, bad = validate.check_new([r["sha256"], None])
@@ -57,3 +58,7 @@ def test_new_document_is_validated_once_at_ingest(mods):
     with db.conn() as c:
         assert c.execute("SELECT ok FROM document WHERE content_sha = %s", (r["sha256"],)).fetchone()["ok"] is True
     assert validate.check_new([r["sha256"]]) == (0, 0)          # already checked: not fetched again
+    cut = ingest.ingest("https://ranchi.nic.in/test/notices/truncated.pdf", pdf[: len(pdf) // 2] + b"\n%%% cut " + r["sha256"].encode(),
+                        content_type="application/pdf", vantage="dev-vps-2", run_id="pytest")
+    with db.conn() as c:
+        assert c.execute("SELECT ok FROM document WHERE content_sha = %s", (cut["sha256"],)).fetchone()["ok"] is False

@@ -188,9 +188,7 @@ async def ingest_one(request: Request):
                         vantage=b.get("vantage", "pool"), http_status=b.get("http_status", 200),
                         final_url=b.get("final_url"), headers=b.get("headers"), robots_ok=b.get("robots_ok"),
                         run_id=b.get("run_id"), linked_from=b.get("linked_from"))
-    if out.get("is_document"):
-        _validate_later([out.get("sha256")])
-    return out
+    return out   # the body was in hand: ingest.ingest already set document.ok
 
 
 @app.post("/ingest/batch", dependencies=[Depends(auth)])

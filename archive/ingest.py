@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-from . import db, store, text
+from . import db, store, text, validate
 
 INGEST_TIMEOUT = "80s"   # under the workers' 90 s HTTP timeout: a stuck write fails and frees its locks instead of holding them
 
@@ -52,10 +52,11 @@ def ingest(url, content, content_type=None, fetched_at=None, vantage="dev-vps-2"
                     tkey_chars = len(txt)
             if is_doc:
                 lf = json.dumps((linked_from or [])[:20])
-                c.execute("""INSERT INTO document (content_sha, ext, linked_from) VALUES (%s,%s,%s)
-                             ON CONFLICT (content_sha) DO UPDATE SET linked_from =
+                c.execute("""INSERT INTO document (content_sha, ext, linked_from, ok) VALUES (%s,%s,%s,%s)
+                             ON CONFLICT (content_sha) DO UPDATE SET ok = COALESCE(document.ok, EXCLUDED.ok), linked_from =
                                (SELECT to_jsonb(array(SELECT DISTINCT jsonb_array_elements(document.linked_from || EXCLUDED.linked_from) LIMIT 50)))""",
-                          (sha, (DOC_EXT.search(url).group(1).lower() if DOC_EXT.search(url) else None), lf))
+                          (sha, (DOC_EXT.search(url).group(1).lower() if DOC_EXT.search(url) else None), lf,
+                           validate.check_bytes(content)))
         cap = c.execute("""INSERT INTO capture (url, host, fetched_at, vantage, http_status, final_url, content_sha,
                              content_type, is_document, headers, robots_ok, run_id)
                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",

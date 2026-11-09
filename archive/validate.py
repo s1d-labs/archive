@@ -3,7 +3,8 @@ false=truncated/corrupt/missing). Cheap + scalable: for a PDF it range-fetches o
 B2 (no full download) and checks for %PDF ... %%EOF — which is exactly what truncation breaks. Non-PDF documents can't be
 validated this cheaply, so they are left ok=true (present). A nonzero `false` count = captures to re-crawl.
 
-Each new document is checked once, right after it is ingested (api.py hands its sha to check_new, in the background).
+Each new document is checked once, as it is ingested: with the body in hand (ingest.ingest, e.g. import_hub) from the bytes,
+otherwise (worker already uploaded to B2) api.py hands its sha to check_new, in the background.
 `python -m archive.validate [limit]` is the daily safety sweep for anything that missed that (an API restart mid-check) and,
 at first, the backlog from before checks ran at ingest; the partial index document_unchecked keeps it cheap.
 
@@ -21,6 +22,13 @@ def _range(sha, rng):
         return s3.get_object(Bucket=bucket, Key=store.blob_key(sha), Range=rng)["Body"].read()
     except Exception:  # noqa: BLE001  missing object or range error
         return None
+
+
+def check_bytes(content):
+    """The same test on a body already in memory (ingest.ingest sets document.ok with it, no B2 round trip)."""
+    if content[:5] == b"%PDF-":
+        return b"%%EOF" in content[-4096:]
+    return True
 
 
 def check(sha, content_type):
