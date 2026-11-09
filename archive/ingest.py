@@ -101,10 +101,22 @@ def _meta_rows(c, b):
                       sha, ct, is_doc, json.dumps(b.get("headers") or {}), b.get("robots_ok"), b.get("run_id"))).fetchone()
 
 
+def _clean(v):
+    """Drop lone UTF-16 surrogates (e.g. '\\ud94c' from a broken page) that JSON allows but Postgres and UTF-8 refuse;
+    one such character failed a whole 25-capture batch with a 500 (2026-11-09)."""
+    if isinstance(v, str):
+        return v.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(v, list):
+        return [_clean(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _clean(x) for k, x in v.items()}
+    return v
+
+
 def ingest_meta(url, **kw):
     """Record one already-uploaded capture (blob+text in B2). Writes rows only — no bytes/B2/extraction here."""
     with db.conn(INGEST_TIMEOUT) as c:
-        cap = _meta_rows(c, {"url": url, **kw})
+        cap = _meta_rows(c, _clean({"url": url, **kw}))
         c.commit()
     return {"capture_id": cap["id"], "sha256": kw.get("content_sha"), "host": _host(kw.get("final_url") or url)}
 
@@ -114,6 +126,6 @@ def ingest_meta_batch(items):
     one per capture collapses dev-vps-2's write load, so worker count (and thus aggregate download bandwidth) can scale."""
     with db.conn(INGEST_TIMEOUT) as c:
         for b in items:
-            _meta_rows(c, b)
+            _meta_rows(c, _clean(b))
         c.commit()
     return {"ingested": len(items)}

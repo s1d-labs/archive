@@ -128,6 +128,8 @@ class Sink:
         if content is not None:
             sha = store.sha256(content)
             txt = text.extract(content, content_type, url)
+            if txt:
+                txt = txt.encode("utf-8", "replace").decode("utf-8")   # no lone surrogates: the ingest API refuses them
             tsha = store.sha256(txt.encode("utf-8", "replace")) if txt else None
             # text goes to B2 (below) AND in the batch (capped) so the ingest builds the search index at capture time —
             # cheap now that writes are batched, and it keeps search current without a slow from-B2 backfill
