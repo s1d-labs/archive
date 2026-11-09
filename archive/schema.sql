@@ -120,3 +120,15 @@ CREATE TABLE IF NOT EXISTS doc_ref (
 );
 CREATE INDEX IF NOT EXISTS doc_ref_value ON doc_ref (kind, value);
 CREATE TABLE IF NOT EXISTS doc_ref_done (sha256 TEXT PRIMARY KEY, at TIMESTAMPTZ NOT NULL DEFAULT now());
+
+-- Deep pass: one host's crawl frontier (pages still to visit + URLs already seen), saved by the capture worker so a host
+-- with more pages than one job can crawl continues in the next job instead of starting again from its front page.
+CREATE TABLE IF NOT EXISTS frontier (
+  host       text PRIMARY KEY,
+  state      bytea NOT NULL,            -- gzip(json {q, seen, seen_docs})
+  pages      integer NOT NULL DEFAULT 0,
+  docs       integer NOT NULL DEFAULT 0,
+  queued     integer NOT NULL DEFAULT 0,
+  done       boolean NOT NULL DEFAULT false,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);

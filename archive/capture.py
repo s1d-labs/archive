@@ -120,6 +120,11 @@ class Sink:
             self._flush()
         return {"buffered": len(self._buf)}
 
+    async def flush(self):
+        """Write buffered captures now (the deep pass calls this before it saves a frontier)."""
+        if self.mode == "direct":
+            await asyncio.to_thread(self._flush)
+
     def _flush(self):
         if self._buf:
             self._api_post("/ingest/batch", {"items": self._buf})
@@ -150,12 +155,28 @@ class Sink:
             await asyncio.to_thread(self._flush)      # write any captures still buffered for this host
 
 
-async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000, gap=GAP_S, proxy=None):
+async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000, gap=GAP_S, proxy=None,
+                       state=None, deadline=None, checkpoint=None, checkpoint_every=500):
+    """Breadth-first walk of one host. Deep pass: `state` ({q, seen, seen_docs, pages, docs}) resumes a saved frontier,
+    `deadline` (epoch seconds) stops the walk in time, and `checkpoint(state, done)` is awaited every `checkpoint_every`
+    pages and at the end, so the next job continues where this one stopped."""
     host = urlsplit(start_url).hostname
-    seen, seen_docs = set(), set()
-    q = deque([start_url])
-    pages = docs = 0
-    while q and pages < max_pages:
+    if state:
+        seen, seen_docs = set(state.get("seen", ())), set(state.get("seen_docs", ()))
+        q = deque(state.get("q") or [])
+        pages, docs = int(state.get("pages", 0)), int(state.get("docs", 0))
+    else:
+        seen, seen_docs = set(), set()
+        q = deque([start_url])
+        pages = docs = 0
+    start_pages = pages
+
+    def snapshot():
+        return {"q": list(q), "seen": list(seen), "seen_docs": list(seen_docs), "pages": pages, "docs": docs}
+
+    while q and pages < max_pages and not (deadline and time.time() > deadline):
+        if checkpoint and pages > start_pages and (pages - start_pages) % checkpoint_every == 0:
+            await checkpoint(snapshot(), False)
         url = q.popleft()
         if url in seen:
             continue
@@ -175,7 +196,10 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
                     await sink.send(d, dmeta["status"], dmeta.get("final"), dbody, dmeta.get("ctype"), linked_from=[url])
                     docs += 1
         await asyncio.sleep(gap)
-    return {"host": host, "pages": pages, "documents": docs}
+    complete = not q
+    if checkpoint:
+        await checkpoint(snapshot(), complete)
+    return {"host": host, "pages": pages, "documents": docs, "complete": complete, "queued": len(q)}
 
 
 async def _get(session, url, proxy=None):

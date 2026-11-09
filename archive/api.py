@@ -117,6 +117,30 @@ async def refs_report(request: Request):
     return {"ok": True, "docs": len(done), "refs": len(rows)}
 
 
+@app.get("/frontier/{host}", dependencies=[Depends(auth)])
+def frontier_get(host: str):
+    """A host's saved deep-pass frontier (gzip json), or 404 when the deep pass has not started it yet."""
+    from fastapi.responses import Response
+    with db.conn() as c:
+        row = c.execute("SELECT state, pages, docs, done FROM frontier WHERE host=%s", (host,)).fetchone()
+    if not row:
+        raise HTTPException(404, "no frontier")
+    return Response(bytes(row["state"]), media_type="application/gzip",
+                    headers={"X-Pages": str(row["pages"]), "X-Docs": str(row["docs"]), "X-Done": "1" if row["done"] else "0"})
+
+
+@app.put("/frontier/{host}", dependencies=[Depends(auth)])
+async def frontier_put(host: str, request: Request, pages: int = 0, docs: int = 0, queued: int = 0, done: int = 0):
+    """Save a host's deep-pass frontier: body = gzip json {q, seen, seen_docs}; counters in the query string."""
+    state = await request.body()
+    with db.conn() as c:
+        c.execute("""INSERT INTO frontier (host, state, pages, docs, queued, done) VALUES (%s, %s, %s, %s, %s, %s)
+                     ON CONFLICT (host) DO UPDATE SET state=EXCLUDED.state, pages=EXCLUDED.pages, docs=EXCLUDED.docs,
+                     queued=EXCLUDED.queued, done=EXCLUDED.done, updated_at=now()""",
+                  (host, state, pages, docs, queued, bool(done)))
+    return {"ok": True}
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True}

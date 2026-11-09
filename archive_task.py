@@ -13,6 +13,10 @@ API = os.environ["ARCHIVE_API"]                      # https://archive.s1d.me  (
 TOKEN = os.environ["ARCHIVE_INGEST_TOKEN"]
 VANTAGE = os.environ.get("ARCHIVE_VANTAGE", "pool")
 MAX_PAGES = int(os.environ.get("MAX_PAGES", "250"))
+# Deep pass (DEEP=1): one host per item, crawled across many jobs. The frontier is saved to the archive API every few hundred
+# pages and when the job's time is up; an unfinished host goes back to the queue as pending and the next job resumes it.
+DEEP = os.environ.get("DEEP") == "1"
+MAX_DOCS = int(os.environ.get("MAX_DOCS", "200000" if DEEP else "20000"))
 DEADLINE = time.time() + float(os.environ.get("SCRAPE_MAX_HOURS", "1")) * 3600 - 120
 
 
@@ -36,10 +40,22 @@ def main():
                 # direct sink: upload blob + text straight to B2 (presigned), report only metadata — dev-vps-2 is off the byte path
                 sink = capture.Sink("direct", api=API, token=TOKEN, run_id=run_id, vantage=VANTAGE)
                 try:
-                    res = await capture.run([url], sink, max_pages=MAX_PAGES)
+                    if not DEEP:
+                        res = await capture.run([url], sink, max_pages=MAX_PAGES)
+                        return res[0]
+                    host = item["key"]
+                    state = await frontier_load(host)
+                    if state and state.get("done"):
+                        return {"host": host, "pages": 0, "documents": 0, "complete": True}
+
+                    async def save(st, done):
+                        await sink.flush()                   # captures before the frontier that says they are done
+                        await frontier_save(host, st, done)
+                    async with capture.make_session() as s:
+                        return await capture.capture_host(s, url, sink, max_pages=MAX_PAGES, max_docs=MAX_DOCS, state=state,
+                                                          deadline=DEADLINE - 300, checkpoint=save)
                 finally:
                     await sink.close()
-                return res[0]
 
             try:
                 r = asyncio.run(go())
@@ -49,11 +65,44 @@ def main():
                 continue
             hub.metric("pages", r["pages"])
             hub.metric("documents", r["documents"])
+            if DEEP and not r.get("complete", True):
+                hub.complete([item["key"]], "pending", fetched=r["pages"] + r["documents"])   # resume in the next job
+                break                                                                          # this job's time is used up
             hub.complete([item["key"]], "done", fetched=r["pages"] + r["documents"])
         hub.close()
     except BaseException as e:
         hub.close("failed", f"{type(e).__name__}: {e}"[:200])
         raise
+
+
+async def frontier_load(host):
+    """The host's saved frontier, or None when the deep pass has not started it."""
+    import gzip, json
+    import aiohttp
+    async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {TOKEN}", "User-Agent": capture.UA}) as s:
+        async with s.get(f"{API}/frontier/{host}", timeout=aiohttp.ClientTimeout(total=300)) as r:
+            if r.status == 404:
+                return None
+            r.raise_for_status()
+            st = json.loads(gzip.decompress(await r.read()))
+            st["done"] = r.headers.get("X-Done") == "1"
+            return st
+
+
+async def frontier_save(host, st, done):
+    import gzip, json
+    import aiohttp
+    body = gzip.compress(json.dumps(st, separators=(",", ":")).encode(), 6)
+    params = {"pages": st["pages"], "docs": st["docs"], "queued": len(st["q"]), "done": int(done)}
+    async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {TOKEN}", "User-Agent": capture.UA}) as s:
+        for attempt in range(4):
+            try:
+                async with s.put(f"{API}/frontier/{host}", params=params, data=body,
+                                 timeout=aiohttp.ClientTimeout(total=300)) as r:
+                    r.raise_for_status()
+                    return
+            except Exception:  # noqa: BLE001  a lost checkpoint costs re-crawling, never data; retry a few times
+                await asyncio.sleep(5 * (attempt + 1))
 
 
 if __name__ == "__main__":
