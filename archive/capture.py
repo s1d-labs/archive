@@ -61,7 +61,7 @@ class Sink:
         elif mode == "direct":
             self._buf = []                            # metadata buffered, flushed to /ingest/batch in groups (see _direct)
 
-    async def send(self, url, status, final_url, content, content_type, linked_from=None):
+    async def send(self, url, status, final_url, content, content_type, linked_from=None, fetched_at=None):
         if self.mode == "local":
             from . import ingest
             return await asyncio.to_thread(ingest.ingest, url, content, content_type=content_type, vantage=self.vantage,
@@ -69,7 +69,7 @@ class Sink:
         if self.mode == "b2":
             return await asyncio.to_thread(self._to_b2, url, status, final_url, content, content_type, linked_from)
         if self.mode == "direct":
-            return await asyncio.to_thread(self._direct, url, status, final_url, content, content_type, linked_from)
+            return await asyncio.to_thread(self._direct, url, status, final_url, content, content_type, linked_from, fetched_at)
         body = {"url": url, "http_status": status, "final_url": final_url, "content_type": content_type,
                 "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from,
                 "body_b64": base64.b64encode(content).decode() if content is not None else None}
@@ -118,13 +118,15 @@ class Sink:
                 return r.status
         return self._retry(go)
 
-    def _direct(self, url, status, final_url, content, content_type, linked_from):
+    def _direct(self, url, status, final_url, content, content_type, linked_from, fetched_at=None):
         """Scale path: hash + extract here, upload the blob (and text) straight to B2 via presigned URLs, then report
         only metadata + text to the ingest API. dev-vps-2 never touches the bytes, so the pool can run many workers."""
         from . import store, text
         meta = {"url": url, "http_status": status, "final_url": final_url, "content_type": content_type,
                 "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from,
                 "content_sha": None, "size": 0, "text_sha": None, "text_chars": 0}
+        if fetched_at:
+            meta["fetched_at"] = fetched_at              # a Wayback copy keeps the date the page was really captured
         if content is not None:
             sha = store.sha256(content)
             txt = text.extract(content, content_type, url)
