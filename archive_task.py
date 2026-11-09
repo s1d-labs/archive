@@ -50,6 +50,8 @@ def main():
 
                     async def save(st, done):
                         await sink.flush()                   # captures before the frontier that says they are done
+                        if done and st["pages"] <= 1:
+                            return                           # the start page failed: no frontier, so a retry starts fresh
                         await frontier_save(host, st, done)
                     async with capture.make_session() as s:
                         return await capture.capture_host(s, url, sink, max_pages=MAX_PAGES, max_docs=MAX_DOCS, state=state,
@@ -65,6 +67,9 @@ def main():
                 continue
             hub.metric("pages", r["pages"])
             hub.metric("documents", r["documents"])
+            if DEEP and r.get("complete") and r["pages"] <= 1:
+                hub.complete([item["key"]], "failed", error="start page gave no links (blocked or down from this vantage)")
+                continue
             if DEEP and not r.get("complete", True):
                 hub.complete([item["key"]], "pending", fetched=r["pages"] + r["documents"])   # resume in the next job
                 break                                                                          # this job's time is used up
