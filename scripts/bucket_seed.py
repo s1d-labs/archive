@@ -88,6 +88,9 @@ def main():
             key = f"{bucket}:{i:06d}"
             rows.append("\t".join([PROJECT, key, str(zlib.crc32(key.encode()) % 1000000),
                                    json.dumps({"bucket": bucket, "files": files}).replace("\\", "\\\\")]))
+        if not rows:
+            print(json.dumps({"source": source, "bucket": bucket, "files": 0, "items": 0, "skipped": n_skip}), flush=True)
+            continue
         # one psql script on stdin: create, COPY the rows (terminated by \.), insert into the queue
         script = ("CREATE TEMP TABLE s (project text, key text, partition_id int, payload jsonb);\n"
                   "COPY s FROM STDIN;\n" + "\n".join(rows) + "\n\\.\n"
