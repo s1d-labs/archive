@@ -78,22 +78,45 @@ class Sink:
                 raise RuntimeError(f"ingest {r.status}: {(await r.text())[:120]}")
             return await r.json()
 
+    @staticmethod
+    def _retry(fn, tries=6):
+        """Retry a call on 5xx, 429 and network errors with backoff (5, 10, 20, 40, 60 s). The ingest API or B2 being busy
+        for a minute must not fail a whole host (502s from archive.s1d.me under load did, 2026-11-09)."""
+        import time as _t
+        import urllib.error
+        for i in range(tries):
+            try:
+                return fn()
+            except urllib.error.HTTPError as e:
+                if e.code < 500 and e.code != 429 or i == tries - 1:
+                    raise
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if i == tries - 1:
+                    raise
+            _t.sleep(min(60, 5 * 2 ** i))
+
     def _api_post(self, path, body):
         """POST JSON to the ingest API (token + UA; the UA matters — Cloudflare 403s the default urllib UA, error 1010)."""
         import urllib.request
         data = json.dumps(body).encode()
-        req = urllib.request.Request(f"{self.api}{path}", data=data, headers={
-            "Authorization": f"Bearer {self.token}", "Content-Type": "application/json",
-            "User-Agent": "archive-pool/1.0 (+https://archive.s1d.me)"})
-        with urllib.request.urlopen(req, timeout=90) as r:
-            return json.loads(r.read())
+
+        def go():
+            req = urllib.request.Request(f"{self.api}{path}", data=data, headers={
+                "Authorization": f"Bearer {self.token}", "Content-Type": "application/json",
+                "User-Agent": "archive-pool/1.0 (+https://archive.s1d.me)"})
+            with urllib.request.urlopen(req, timeout=90) as r:
+                return json.loads(r.read())
+        return self._retry(go)
 
     def _b2_put(self, url, data):
         """Upload bytes straight to B2 via a presigned PUT URL (no B2 credential on this worker)."""
         import urllib.request
-        req = urllib.request.Request(url, data=data, method="PUT")
-        with urllib.request.urlopen(req, timeout=180) as r:
-            return r.status
+
+        def go():
+            req = urllib.request.Request(url, data=data, method="PUT")
+            with urllib.request.urlopen(req, timeout=180) as r:
+                return r.status
+        return self._retry(go)
 
     def _direct(self, url, status, final_url, content, content_type, linked_from):
         """Scale path: hash + extract here, upload the blob (and text) straight to B2 via presigned URLs, then report
