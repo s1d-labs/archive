@@ -23,6 +23,41 @@ def same_site(host, other):
     return bool(b) and a == b
 
 
+import re as _re
+from urllib.parse import parse_qsl, urlencode, urlunsplit
+
+# Crawler-trap guards (2026-11-10: deep-pass frontiers held 8.7 M URLs, mostly filter/sort/calendar variants of one page:
+# nipfp blog index ?year&month 1.2 M, indiahandmade catalogue filters 1 M, licindia tenders list 113 K).
+JUNK_PARAM = _re.compile(r"^(utm_\w+|fbclid|gclid|mc_\w+|_ga|sessionid|jsessionid|phpsessid|sid|cid|sort|order|orderby|dir|"
+                         r"limit|mode|view|layout|print|share|replytocom|ref|referer|return_?url|redirect|lang_switch|t|ts|_)$", _re.I)
+DEAD_END = _re.compile(r"/(login|logout|signin|sign-in|signup|register|account|customer|cart|checkout|wishlist|compare|"
+                       r"catalogsearch|search|calendar|print|share|feed|wp-json|xmlrpc)(/|$|\.)", _re.I)
+MAX_PARAMS = 3          # more query parameters than this = a filter combination, not a page
+PATH_CAP = 5000         # at most this many query variants of one path (real id/page lists fit; filter explosions stop)
+PLAIN_CAP = 50          # a path that also exists WITHOUT a query: its query variants are mostly copies (?year=&month=)
+
+
+def canon(u, host):
+    """One spelling per URL: start host's www/non-www form, no fragment, no junk parameters, sorted parameters, no '//'
+    in the path. None for a dead end (login, cart, search...) or a filter combination."""
+    p = urlsplit(u)
+    if DEAD_END.search(p.path):
+        return None
+    q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if not JUNK_PARAM.match(k)]
+    if len(q) > MAX_PARAMS:
+        return None
+    path = _re.sub(r"/{2,}", "/", p.path) or "/"
+    netloc = p.netloc.lower()                          # keep the port; hosts are case-blind; unify www / non-www below
+    if p.hostname and same_site(host, p.hostname) and p.hostname != host:
+        netloc = netloc.replace(p.hostname, host, 1)
+    return urlunsplit((p.scheme, netloc, path, urlencode(sorted(q)), ""))
+
+
+def path_key(u):
+    p = urlsplit(u)
+    return p.path
+
+
 def links(base, html):
     import re
     pages, docs = [], []
@@ -204,7 +239,34 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
         seen, seen_docs = set(), set()
         q = deque([start_url])
         pages = docs = 0
+    from collections import Counter
+    per_path = Counter(path_key(u) for u in seen)      # query variants already taken per path (trap cap)
+    plain = {path_key(u) for u in seen if not urlsplit(u).query}   # paths also seen without a query
+
+    def cap(c):
+        return PLAIN_CAP if path_key(c) in plain else PATH_CAP
+    if state:                                          # prune a resumed frontier with the same rules
+        kept = []
+        for u in q:
+            c = canon(u, host)
+            if c and c not in seen and (not urlsplit(c).query or per_path[path_key(c)] < cap(c)):
+                per_path[path_key(c)] += 1
+                kept.append(c)
+        q = deque(dict.fromkeys(kept))
     inflight = set()                                   # popped but not finished: kept in a checkpoint so a resume refetches them
+
+    def take(u):
+        """Queue a found link if it passes the trap guards."""
+        c = canon(u, host)
+        if not c or c in seen:
+            return None
+        k = path_key(c)
+        if not urlsplit(c).query:
+            plain.add(k)
+        elif per_path[k] >= cap(c):
+            return None
+        per_path[k] += 1
+        return c
     last_cp = pages
 
     def snapshot():
@@ -234,10 +296,13 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
                 if body and b"html" in (meta.get("ctype") or "").encode():
                     pl, dl = links(meta.get("final") or url, body)
                     for u in pl:
-                        if u not in seen and same_site(host, urlsplit(u).hostname):
-                            q.append(u)
+                        if same_site(host, urlsplit(u).hostname):
+                            c = take(u)
+                            if c:
+                                q.append(c)
                     for d in dl:
-                        if d not in seen_docs and same_site(host, urlsplit(d).hostname) and docs < max_docs:
+                        d = canon(d, host) if same_site(host, urlsplit(d).hostname) else None
+                        if d and d not in seen_docs and docs < max_docs:
                             seen_docs.add(d)
                             dmeta, dbody = await _get(session, d, proxy)
                             await sink.send(d, dmeta["status"], dmeta.get("final"), dbody, dmeta.get("ctype"), linked_from=[url])
