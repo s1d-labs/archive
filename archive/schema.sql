@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS blob (
 );
 CREATE INDEX IF NOT EXISTS blob_tsv_gin ON blob USING GIN (tsv);
 -- Direct GIN updates: with fastupdate on, a busy ingest let the pending-list cleanup run for an hour and block inserts.
-ALTER INDEX blob_tsv_gin SET (fastupdate = off);
+-- fastupdate ON (2026-11-10): direct GIN inserts were the biggest Postgres cost (random pages + full-page WAL per lexeme);
+-- the pending list is merged in bulk by vacuum, so new text becomes searchable a little later.
+ALTER INDEX blob_tsv_gin SET (fastupdate = on, gin_pending_list_limit = 65536);
 
 -- Search the captured corpus: every URL where a matching blob appeared, newest first.
 --   SELECT url, host, fetched_at FROM search WHERE tsv @@ websearch_to_tsquery('simple', 'land acquisition') ORDER BY fetched_at DESC;

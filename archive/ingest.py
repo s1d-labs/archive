@@ -67,7 +67,7 @@ def ingest(url, content, content_type=None, fetched_at=None, vantage="dev-vps-2"
             "text_chars": tkey_chars, "host": host}
 
 
-def _meta_rows(c, b):
+def _meta_rows(c, b, known=None):
     """Write the blob/document/capture rows for one already-uploaded capture, on cursor `c` (no commit). `b` is a dict.
     tsv is NOT computed here (heaviest per-request CPU) — fts_backfill builds it from the text in B2. Plain inserts only,
     so many pool workers can report captures without overloading dev-vps-2."""
@@ -79,7 +79,9 @@ def _meta_rows(c, b):
     ct = b.get("content_type")
     host = _host(b.get("final_url") or url)
     is_doc = _is_document(b.get("final_url") or url, ct)
-    if sha:
+    if sha and known is not None and sha in known:
+        pass                                           # blob row complete (text indexed): no rewrite, no to_tsvector, no GIN work
+    elif sha:
         txt = (b.get("text") or "").replace("\x00", "")   # NULs are legal in extracted text but Postgres text/tsvector rejects them
         # build the full-text index here (batched, so cheap): new captures are searchable at once, and a re-captured blob
         # whose row had a null tsv gets filled. 'simple' config = multilingual. No text -> tsv stays null.
@@ -88,7 +90,9 @@ def _meta_rows(c, b):
                      ON CONFLICT (sha256) DO UPDATE SET
                        text_sha = COALESCE(blob.text_sha, EXCLUDED.text_sha),
                        text_chars = COALESCE(blob.text_chars, EXCLUDED.text_chars),
-                       tsv = COALESCE(blob.tsv, EXCLUDED.tsv)""",
+                       tsv = COALESCE(blob.tsv, EXCLUDED.tsv)
+                     WHERE (blob.tsv IS NULL AND EXCLUDED.tsv IS NOT NULL)
+                        OR (blob.text_sha IS NULL AND EXCLUDED.text_sha IS NOT NULL)""",
                   (sha, b.get("size", 0), ct, store.blob_key(sha), b.get("text_sha"), b.get("text_chars", 0), txt, txt))
         if is_doc:
             m = DOC_EXT.search(url)
@@ -125,8 +129,14 @@ def ingest_meta(url, **kw):
 def ingest_meta_batch(items):
     """Record many already-uploaded captures in ONE transaction — the pool's scale path. One commit per batch instead of
     one per capture collapses dev-vps-2's write load, so worker count (and thus aggregate download bandwidth) can scale."""
+    # Database cost (2026-11-10, measured by another session): skip blobs already complete, and take row locks in sha order
+    # so concurrent batches never wait on each other in opposite order.
+    items = sorted((_clean(b) for b in items), key=lambda b: b.get("content_sha") or "")
+    shas = [b["content_sha"] for b in items if b.get("content_sha")]
     with db.conn(INGEST_TIMEOUT) as c:
+        known = {r["sha256"] for r in c.execute(
+            "SELECT sha256 FROM blob WHERE sha256 = ANY(%s) AND (tsv IS NOT NULL OR text_sha IS NULL)", (shas,)).fetchall()} if shas else set()
         for b in items:
-            _meta_rows(c, _clean(b))
+            _meta_rows(c, b, known)
         c.commit()
-    return {"ingested": len(items)}
+    return {"ingested": len(items), "known": len(known)}
