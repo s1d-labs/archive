@@ -190,10 +190,11 @@ class Sink:
 
 
 async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000, gap=GAP_S, proxy=None,
-                       state=None, deadline=None, checkpoint=None, checkpoint_every=500):
+                       state=None, deadline=None, checkpoint=None, checkpoint_every=500, concurrency=1):
     """Breadth-first walk of one host. Deep pass: `state` ({q, seen, seen_docs, pages, docs}) resumes a saved frontier,
     `deadline` (epoch seconds) stops the walk in time, and `checkpoint(state, done)` is awaited every `checkpoint_every`
-    pages and at the end, so the next job continues where this one stopped."""
+    pages and at the end, so the next job continues where this one stopped. `concurrency` = requests in flight to this host
+    at once (1 for the first pass; the deep pass uses more: one request at a time made a 1.7 M-page site a 19-day crawl)."""
     host = urlsplit(start_url).hostname
     if state:
         seen, seen_docs = set(state.get("seen", ())), set(state.get("seen_docs", ()))
@@ -203,34 +204,53 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
         seen, seen_docs = set(), set()
         q = deque([start_url])
         pages = docs = 0
-    start_pages = pages
+    inflight = set()                                   # popped but not finished: kept in a checkpoint so a resume refetches them
+    last_cp = pages
 
     def snapshot():
-        return {"q": list(q), "seen": list(seen), "seen_docs": list(seen_docs), "pages": pages, "docs": docs}
+        return {"q": list(inflight) + list(q), "seen": list(seen - inflight), "seen_docs": list(seen_docs),
+                "pages": pages, "docs": docs}
 
-    while q and pages < max_pages and not (deadline and time.time() > deadline):
-        if checkpoint and pages > start_pages and (pages - start_pages) % checkpoint_every == 0:
-            await checkpoint(snapshot(), False)
-        url = q.popleft()
-        if url in seen:
-            continue
-        seen.add(url)
-        meta, body = await _get(session, url, proxy)
-        await sink.send(url, meta["status"], meta.get("final"), body, meta.get("ctype"))
-        pages += 1
-        if body and b"html" in (meta.get("ctype") or "").encode():
-            pl, dl = links(meta.get("final") or url, body)
-            for u in pl:
-                if u not in seen and same_site(host, urlsplit(u).hostname):
-                    q.append(u)
-            for d in dl:
-                if d not in seen_docs and same_site(host, urlsplit(d).hostname) and docs < max_docs:
-                    seen_docs.add(d)
-                    dmeta, dbody = await _get(session, d, proxy)
-                    await sink.send(d, dmeta["status"], dmeta.get("final"), dbody, dmeta.get("ctype"), linked_from=[url])
-                    docs += 1
-        await asyncio.sleep(gap)
-    complete = not q
+    def stop():
+        return pages >= max_pages or (deadline and time.time() > deadline)
+
+    async def worker():
+        nonlocal pages, docs, last_cp
+        while not stop():
+            if not q:
+                if not inflight:
+                    return                             # nothing queued and nobody fetching: the host is done
+                await asyncio.sleep(0.2)
+                continue
+            url = q.popleft()
+            if url in seen:
+                continue
+            seen.add(url)
+            inflight.add(url)
+            try:
+                meta, body = await _get(session, url, proxy)
+                await sink.send(url, meta["status"], meta.get("final"), body, meta.get("ctype"))
+                pages += 1
+                if body and b"html" in (meta.get("ctype") or "").encode():
+                    pl, dl = links(meta.get("final") or url, body)
+                    for u in pl:
+                        if u not in seen and same_site(host, urlsplit(u).hostname):
+                            q.append(u)
+                    for d in dl:
+                        if d not in seen_docs and same_site(host, urlsplit(d).hostname) and docs < max_docs:
+                            seen_docs.add(d)
+                            dmeta, dbody = await _get(session, d, proxy)
+                            await sink.send(d, dmeta["status"], dmeta.get("final"), dbody, dmeta.get("ctype"), linked_from=[url])
+                            docs += 1
+            finally:
+                inflight.discard(url)
+            if checkpoint and pages - last_cp >= checkpoint_every:
+                last_cp = pages
+                await checkpoint(snapshot(), False)
+            await asyncio.sleep(gap)
+
+    await asyncio.gather(*(worker() for _ in range(max(1, concurrency))))
+    complete = not q and not inflight
     if checkpoint:
         await checkpoint(snapshot(), complete)
     return {"host": host, "pages": pages, "documents": docs, "complete": complete, "queued": len(q)}

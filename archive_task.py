@@ -55,7 +55,8 @@ def main():
                         await frontier_save(host, st, done)
                     async with capture.make_session() as s:
                         return await capture.capture_host(s, url, sink, max_pages=MAX_PAGES, max_docs=MAX_DOCS, state=state,
-                                                          deadline=DEADLINE - 300, checkpoint=save)
+                                                          deadline=DEADLINE - 300, checkpoint=save,
+                                                          concurrency=int(os.environ.get("DEEP_CONCURRENCY", "4")))
                 finally:
                     await sink.close()
 
