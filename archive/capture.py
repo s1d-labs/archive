@@ -59,7 +59,9 @@ class Sink:
         elif mode == "b2":
             self._f = open(jsonl, "a")
         elif mode == "direct":
+            import threading
             self._buf = []                            # metadata buffered, flushed to /ingest/batch in groups (see _direct)
+            self._lock = threading.Lock()             # sends may run in parallel threads (bucket_task): one batch at a time
 
     async def send(self, url, status, final_url, content, content_type, linked_from=None, fetched_at=None):
         if self.mode == "local":
@@ -142,9 +144,13 @@ class Sink:
                 self._b2_put(prep["raw_url"], content)
             if txt and prep.get("txt_url"):
                 self._b2_put(prep["txt_url"], txt.encode("utf-8", "replace"))
-        self._buf.append(meta)                        # batch the index write: one DB txn per ~25 captures, not per capture
-        if len(self._buf) >= 25:
-            self._flush()
+        with self._lock:
+            self._buf.append(meta)                    # batch the index write: one DB txn per ~25 captures, not per capture
+            batch = self._buf if len(self._buf) >= 25 else None
+            if batch:
+                self._buf = []
+        if batch:
+            self._api_post("/ingest/batch", {"items": batch})
         return {"buffered": len(self._buf)}
 
     async def flush(self):
@@ -153,9 +159,10 @@ class Sink:
             await asyncio.to_thread(self._flush)
 
     def _flush(self):
-        if self._buf:
-            self._api_post("/ingest/batch", {"items": self._buf})
-            self._buf = []
+        with self._lock:
+            batch, self._buf = self._buf, []
+        if batch:
+            self._api_post("/ingest/batch", {"items": batch})
 
     def _to_b2(self, url, status, final_url, content, content_type, linked_from):
         from . import store, text

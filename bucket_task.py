@@ -16,6 +16,7 @@ from archive import capture
 PROJECT = os.environ.get("SCRAPE_POOL_PROJECT", "")
 API = os.environ["ARCHIVE_API"]
 TOKEN = os.environ["ARCHIVE_INGEST_TOKEN"]
+PARALLEL = int(os.environ.get("BUCKET_PARALLEL", "8"))
 DEADLINE = time.time() + float(os.environ.get("SCRAPE_MAX_HOURS", "1")) * 3600 - 300
 
 
@@ -53,14 +54,19 @@ def main():
             async def go():
                 ok = expired = 0
                 sink = capture.Sink("direct", api=API, token=TOKEN, run_id=run_id, vantage="scrape-hub")
-                try:
-                    for f in files:
+                sem = asyncio.Semaphore(PARALLEL)     # download + hash + text + upload of several files at once
+
+                async def one(f):
+                    nonlocal ok, expired
+                    async with sem:
                         st, ctype, body = await asyncio.to_thread(download, f["get"])
                         if st == 403:
                             expired += 1
-                            continue
+                            return
                         await sink.send(f["url"], st, None, body, ctype, fetched_at=f.get("modified"))
                         ok += 1 if body else 0
+                try:
+                    await asyncio.gather(*(one(f) for f in files))
                 finally:
                     await sink.close()
                 return ok, expired
