@@ -9,6 +9,7 @@ Run: uvicorn archive.api:app (via the archive-index.service unit).
 """
 import asyncio
 import os
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -66,6 +67,12 @@ def _token():
     if TOKEN is None:
         TOKEN = os.environ.get("ARCHIVE_INGEST_TOKEN", "")
     return TOKEN
+
+
+def _read_token():
+    """ARCHIVE_READ_TOKEN: a second key that opens only the read endpoints (/get, /search, /host); it cannot ingest. Given to
+    other families' runners that read saved pages before they fetch a live site (civic-officials, 2026-11-12)."""
+    return os.environ.get("ARCHIVE_READ_TOKEN", "")
 
 
 def auth(authorization: str = Header(default="")):
@@ -203,27 +210,35 @@ async def ingest_batch(request: Request):
 
 
 def _authed(request: Request, k: str) -> bool:
-    want = _token()
-    return bool(want) and (request.headers.get("authorization", "") == f"Bearer {want}" or k == want)
+    got = request.headers.get("authorization", "")
+    return any(w and (got == f"Bearer {w}" or k == w) for w in (_token(), _read_token()))
 
 
 @app.get("/get")
-async def get_one(request: Request, url: str, k: str = "", dl: int = 0):
+async def get_one(request: Request, url: str, k: str = "", dl: int = 0, ok: int = 0, max_days: int = 0):
     """Retrieve an archived page/document by its ORIGINAL url (structure preserved — the url is the key). Returns the
-    latest capture, as a time-limited direct-from-B2 link. Token via header or ?k=. ?dl=1 forces download over inline."""
+    latest capture, as a time-limited direct-from-B2 link. Token via header or ?k=. ?dl=1 forces download over inline.
+    ?ok=1: only a capture with HTTP 2xx; ?max_days=N: only one fetched in the last N days. The redirect carries the
+    capture's fetch time, HTTP status and final url (X-Archive-Fetched, X-Archive-Status, X-Archive-Final-Url)."""
     if not _authed(request, k):
         raise HTTPException(401, "bad or missing token")
     import os.path
     from . import store
     with db.conn() as c:
-        row = c.execute("""SELECT b.b2_key, b.content_type FROM capture c JOIN blob b ON c.content_sha = b.sha256
-                           WHERE c.url = %s AND c.content_sha IS NOT NULL ORDER BY c.fetched_at DESC LIMIT 1""",
-                        (url,)).fetchone()
+        row = c.execute("""SELECT b.b2_key, b.content_type, c.fetched_at, c.http_status, c.final_url
+                           FROM capture c JOIN blob b ON c.content_sha = b.sha256
+                           WHERE c.url = %s AND c.content_sha IS NOT NULL
+                             AND (%s = 0 OR c.http_status BETWEEN 200 AND 299)
+                             AND (%s <= 0 OR c.fetched_at > now() - make_interval(days => %s))
+                           ORDER BY c.fetched_at DESC LIMIT 1""",
+                        (url, ok, max_days, max_days)).fetchone()
     if not row:
         raise HTTPException(404, "not archived (try the exact captured url, or /host to browse)")
     fn = os.path.basename(url.split("?")[0]) or "download"
     link = await asyncio.to_thread(store.get_url, row["b2_key"], row["content_type"], fn, 3600, not dl)
-    return RedirectResponse(link)
+    return RedirectResponse(link, headers={"X-Archive-Fetched": row["fetched_at"].isoformat(),
+                                           "X-Archive-Status": str(row["http_status"] or ""),
+                                           "X-Archive-Final-Url": quote(row["final_url"] or "", safe=":/?&=%#+,;@~")})
 
 
 @app.get("/search")
