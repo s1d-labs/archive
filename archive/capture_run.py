@@ -28,7 +28,7 @@ def load(path, limit=0):
     return urls[:limit] if limit else urls
 
 
-async def main_async(path, run_id, concurrency, max_pages, limit):
+async def main_async(path, run_id, concurrency, max_pages, limit, vantage="dev-vps-2"):
     urls = load(path, limit)
     done = already(run_id)
     todo = [u for u in urls if u.split("//", 1)[-1].split("/", 1)[0] not in done]
@@ -37,7 +37,7 @@ async def main_async(path, run_id, concurrency, max_pages, limit):
     n = [0]
     t0 = time.monotonic()
     async with make_session() as s:
-        sink = Sink("local", run_id=run_id, vantage="dev-vps-2")
+        sink = Sink("local", run_id=run_id, vantage=vantage)
 
         async def one(u):
             async with sem:
@@ -60,8 +60,9 @@ def main():
     ap.add_argument("--concurrency", type=int, default=5)
     ap.add_argument("--max-pages", type=int, default=400)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--vantage", default=__import__("socket").gethostname(), help="where the fetch came from (default: this host)")
     a = ap.parse_args()
-    asyncio.run(main_async(a.targets, a.run_id, a.concurrency, a.max_pages, a.limit))
+    asyncio.run(main_async(a.targets, a.run_id, a.concurrency, a.max_pages, a.limit, a.vantage))
 
 
 if __name__ == "__main__":

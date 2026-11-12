@@ -14,12 +14,13 @@ CREATE TABLE IF NOT EXISTS blob (
     ocr           BOOLEAN NOT NULL DEFAULT false,   -- text came from OCR (scanned PDF)
     tsv           TSVECTOR                          -- full-text index of the extracted text ('simple' config; multilingual)
 );
--- blob_tsv_gin (11 GB) DROPPED 2026-11-10 in a disk emergency (99% full). The tsv column is kept and all texts are in B2;
--- rebuild with: CREATE INDEX CONCURRENTLY blob_tsv_gin ON blob USING GIN (tsv)  -- once there is disk for it.
--- CREATE INDEX IF NOT EXISTS blob_tsv_gin ON blob USING GIN (tsv);
+-- Full-text search over every captured text (owner 2026-11-12: "archive search text storage is yes", more disk on dev-vps-3).
+-- It was dropped 2026-11-11 in a disk emergency on dev-vps-2. On a live archive build it with CREATE INDEX CONCURRENTLY first;
+-- this line then only covers a fresh database.
+CREATE INDEX IF NOT EXISTS blob_tsv_gin ON blob USING GIN (tsv);
 -- Direct GIN updates: with fastupdate on, a busy ingest let the pending-list cleanup run for an hour and block inserts.
 -- Kept off (2026-11-10). The GIN cost is cut instead by not touching complete blobs again (ingest_meta_batch).
--- ALTER INDEX blob_tsv_gin SET (fastupdate = off);  (index dropped, see above)
+ALTER INDEX blob_tsv_gin SET (fastupdate = off);
 
 -- Search the captured corpus: every URL where a matching blob appeared, newest first.
 --   SELECT url, host, fetched_at FROM search WHERE tsv @@ websearch_to_tsquery('simple', 'land acquisition') ORDER BY fetched_at DESC;
