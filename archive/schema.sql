@@ -17,10 +17,16 @@ CREATE TABLE IF NOT EXISTS blob (
 -- Full-text search over every captured text (owner 2026-11-12: "archive search text storage is yes", more disk on dev-vps-3).
 -- It was dropped 2026-11-11 in a disk emergency on dev-vps-2. On a live archive build it with CREATE INDEX CONCURRENTLY first;
 -- this line then only covers a fresh database.
-CREATE INDEX IF NOT EXISTS blob_tsv_gin ON blob USING GIN (tsv);
+-- Guarded: a plain CREATE INDEX on a live blob table blocks every capture write for about an hour (2026-11-12, a deploy did it).
+-- So the schema builds it only on an empty table; on a live archive run CREATE INDEX CONCURRENTLY blob_tsv_gin ... by hand.
+DO $$ BEGIN
+  IF to_regclass('public.blob_tsv_gin') IS NULL AND NOT EXISTS (SELECT 1 FROM blob LIMIT 1) THEN
+    CREATE INDEX blob_tsv_gin ON blob USING GIN (tsv);
+  END IF;
+END $$;
 -- Direct GIN updates: with fastupdate on, a busy ingest let the pending-list cleanup run for an hour and block inserts.
 -- Kept off (2026-11-10). The GIN cost is cut instead by not touching complete blobs again (ingest_meta_batch).
-ALTER INDEX blob_tsv_gin SET (fastupdate = off);
+DO $$ BEGIN IF to_regclass('public.blob_tsv_gin') IS NOT NULL THEN ALTER INDEX blob_tsv_gin SET (fastupdate = off); END IF; END $$;
 
 -- Search the captured corpus: every URL where a matching blob appeared, newest first.
 --   SELECT url, host, fetched_at FROM search WHERE tsv @@ websearch_to_tsquery('simple', 'land acquisition') ORDER BY fetched_at DESC;
