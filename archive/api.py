@@ -81,6 +81,26 @@ def auth(authorization: str = Header(default="")):
         raise HTTPException(401, "bad or missing ingest token")
 
 
+@app.post("/seen", dependencies=[Depends(auth)])
+async def seen_recently(request: Request):
+    """Which of these urls already have a 2xx capture in the last `days` days. A worker asks before it fetches documents,
+    so a re-crawl (or a retried host) does not download unchanged files again (2026-11-18: one static PDF had 103 captures
+    in 12 days, all the same bytes). Body: {urls: [...] (at most 500), days: N}. Returns {fresh: [...]}."""
+    b = await request.json()
+    urls = [u for u in (b.get("urls") or []) if isinstance(u, str)][:500]
+    days = float(b.get("days") or 0)
+    if not urls or days <= 0:
+        return {"fresh": []}
+
+    def q():
+        with db.conn() as c:
+            return [r["url"] for r in c.execute(
+                """SELECT u.url FROM unnest(%s::text[]) AS u(url)
+                   WHERE EXISTS (SELECT 1 FROM capture c WHERE c.url = u.url AND c.fetched_at > now() - make_interval(secs => %s)
+                                 AND c.http_status BETWEEN 200 AND 299)""", (urls, days * 86400)).fetchall()]
+    return {"fresh": await asyncio.to_thread(q)}
+
+
 @app.post("/refs/work", dependencies=[Depends(auth)])
 async def refs_work(request: Request):
     """A pool worker's share of the reference scan (archive.refs): presigned 2-hour links to the extracted texts of the

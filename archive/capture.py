@@ -188,6 +188,20 @@ class Sink:
             self._api_post("/ingest/batch", {"items": batch})
         return {"buffered": len(self._buf)}
 
+    async def fresh(self, urls, days):
+        """The urls among `urls` that already have a 2xx capture in the last `days` days (empty when days <= 0, or when the
+        API cannot answer: then the worker fetches as before; a lost check costs a download, never data)."""
+        if not urls or not days or days <= 0 or self.mode not in ("direct", "http"):
+            return set()
+        urls, out = list(urls), set()
+        for i in range(0, len(urls), 500):
+            try:
+                r = await asyncio.to_thread(self._api_post, "/seen", {"urls": urls[i:i + 500], "days": days})
+                out.update(r.get("fresh") or ())
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
     async def flush(self):
         """Write buffered captures now (the deep pass calls this before it saves a frontier)."""
         if self.mode == "direct":
@@ -225,11 +239,12 @@ class Sink:
 
 
 async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000, gap=GAP_S, proxy=None,
-                       state=None, deadline=None, checkpoint=None, checkpoint_every=500, concurrency=1):
+                       state=None, deadline=None, checkpoint=None, checkpoint_every=500, concurrency=1, doc_fresh_days=0):
     """Breadth-first walk of one host. Deep pass: `state` ({q, seen, seen_docs, pages, docs}) resumes a saved frontier,
     `deadline` (epoch seconds) stops the walk in time, and `checkpoint(state, done)` is awaited every `checkpoint_every`
     pages and at the end, so the next job continues where this one stopped. `concurrency` = requests in flight to this host
-    at once (1 for the first pass; the deep pass uses more: one request at a time made a 1.7 M-page site a 19-day crawl)."""
+    at once (1 for the first pass; the deep pass uses more: one request at a time made a 1.7 M-page site a 19-day crawl).
+    `doc_fresh_days` > 0: a document with a 2xx capture in the last N days is not fetched again (counted in "skipped")."""
     host = urlsplit(start_url).hostname
     if state:
         seen, seen_docs = set(state.get("seen", ())), set(state.get("seen_docs", ()))
@@ -239,6 +254,7 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
         seen, seen_docs = set(), set()
         q = deque([start_url])
         pages = docs = 0
+    skipped = 0
     from collections import Counter
     per_path = Counter(path_key(u) for u in seen)      # query variants already taken per path (trap cap)
     plain = {path_key(u) for u in seen if not urlsplit(u).query}   # paths also seen without a query
@@ -277,7 +293,7 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
         return pages >= max_pages or (deadline and time.time() > deadline)
 
     async def worker():
-        nonlocal pages, docs, last_cp
+        nonlocal pages, docs, last_cp, skipped
         while not stop():
             if not q:
                 if not inflight:
@@ -300,13 +316,22 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
                             c = take(u)
                             if c:
                                 q.append(c)
+                    want = {}
                     for d in dl:
                         d = canon(d, host) if same_site(host, urlsplit(d).hostname) else None
-                        if d and d not in seen_docs and docs < max_docs:
-                            seen_docs.add(d)
-                            dmeta, dbody = await _get(session, d, proxy)
-                            await sink.send(d, dmeta["status"], dmeta.get("final"), dbody, dmeta.get("ctype"), linked_from=[url])
-                            docs += 1
+                        if d and d not in seen_docs:
+                            want[d] = True
+                    fresh = await sink.fresh(want, doc_fresh_days) if want else set()
+                    for d in want:
+                        if d in seen_docs or docs >= max_docs:
+                            continue
+                        seen_docs.add(d)
+                        if d in fresh:
+                            skipped += 1
+                            continue
+                        dmeta, dbody = await _get(session, d, proxy)
+                        await sink.send(d, dmeta["status"], dmeta.get("final"), dbody, dmeta.get("ctype"), linked_from=[url])
+                        docs += 1
             finally:
                 inflight.discard(url)
             if checkpoint and pages - last_cp >= checkpoint_every:
@@ -318,7 +343,7 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
     complete = not q and not inflight
     if checkpoint:
         await checkpoint(snapshot(), complete)
-    return {"host": host, "pages": pages, "documents": docs, "complete": complete, "queued": len(q)}
+    return {"host": host, "pages": pages, "documents": docs, "complete": complete, "queued": len(q), "skipped": skipped}
 
 
 async def _get(session, url, proxy=None):

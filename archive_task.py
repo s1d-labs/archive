@@ -18,6 +18,9 @@ MAX_PAGES = int(os.environ.get("MAX_PAGES", "250"))
 DEEP = os.environ.get("DEEP") == "1"
 MAX_DOCS = int(os.environ.get("MAX_DOCS", "200000" if DEEP else "20000"))
 DEADLINE = time.time() + float(os.environ.get("SCRAPE_MAX_HOURS", "1")) * 3600 - 120
+# A document with a 2xx capture in the last DOC_FRESH_DAYS days is not downloaded again. The weekly light pass then fetches
+# only new documents; the monthly deep pass (archive-recrawl on dev-vps-3) gets a new copy of each document about once a month.
+DOC_FRESH_DAYS = float(os.environ.get("DOC_FRESH_DAYS", "25"))
 
 
 def main():
@@ -41,7 +44,11 @@ def main():
                 sink = capture.Sink("direct", api=API, token=TOKEN, run_id=run_id, vantage=VANTAGE)
                 try:
                     if not DEEP:
-                        res = await capture.run([url], sink, max_pages=MAX_PAGES)
+                        # light pass: one job, one try. It stops at the deadline and the host counts as done (before
+                        # 2026-11-18 a host with many documents ran past the job's time, was never marked done, and
+                        # the next job started it again from the top: 512 hosts took more than 10 tries, one 61).
+                        res = await capture.run([url], sink, max_pages=MAX_PAGES, deadline=DEADLINE - 300,
+                                                doc_fresh_days=DOC_FRESH_DAYS)
                         return res[0]
                     host = item["key"]
                     state = await frontier_load(host)
@@ -56,7 +63,8 @@ def main():
                     async with capture.make_session() as s:
                         return await capture.capture_host(s, url, sink, max_pages=MAX_PAGES, max_docs=MAX_DOCS, state=state,
                                                           deadline=DEADLINE - 300, checkpoint=save,
-                                                          concurrency=int(os.environ.get("DEEP_CONCURRENCY", "4")))
+                                                          concurrency=int(os.environ.get("DEEP_CONCURRENCY", "4")),
+                                                          doc_fresh_days=DOC_FRESH_DAYS)
                 finally:
                     await sink.close()
 
@@ -68,6 +76,8 @@ def main():
                 continue
             hub.metric("pages", r["pages"])
             hub.metric("documents", r["documents"])
+            if r.get("skipped"):
+                hub.metric("documents_skipped_fresh", r["skipped"])
             if DEEP and r.get("complete") and r["pages"] <= 1:
                 hub.complete([item["key"]], "failed", error="start page gave no links (blocked or down from this vantage)")
                 continue
