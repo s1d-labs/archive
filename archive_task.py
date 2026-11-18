@@ -21,6 +21,10 @@ DEADLINE = time.time() + float(os.environ.get("SCRAPE_MAX_HOURS", "1")) * 3600 -
 # A document with a 2xx capture in the last DOC_FRESH_DAYS days is not downloaded again. The weekly light pass then fetches
 # only new documents; the monthly deep pass (archive-recrawl on dev-vps-3) gets a new copy of each document about once a month.
 DOC_FRESH_DAYS = float(os.environ.get("DOC_FRESH_DAYS", "25"))
+# The hub lends a proxy="IN" project one Indian proxy per worker as SCRAPE_PROXY (also HTTPS_PROXY, which aiohttp ignores
+# without trust_env). Until 2026-11-18 this task never used it: "IN-proxy" captures came straight from GitHub's runners,
+# and 1,211 India-only hosts failed the deep pass with "start page gave no links".
+PROXY = os.environ.get("SCRAPE_PROXY") or None
 
 
 def main():
@@ -48,7 +52,7 @@ def main():
                         # 2026-11-18 a host with many documents ran past the job's time, was never marked done, and
                         # the next job started it again from the top: 512 hosts took more than 10 tries, one 61).
                         res = await capture.run([url], sink, max_pages=MAX_PAGES, deadline=DEADLINE - 300,
-                                                doc_fresh_days=DOC_FRESH_DAYS)
+                                                doc_fresh_days=DOC_FRESH_DAYS, proxy=PROXY)
                         return res[0]
                     host = item["key"]
                     state = await frontier_load(host)
@@ -64,7 +68,7 @@ def main():
                         return await capture.capture_host(s, url, sink, max_pages=MAX_PAGES, max_docs=MAX_DOCS, state=state,
                                                           deadline=DEADLINE - 300, checkpoint=save,
                                                           concurrency=int(os.environ.get("DEEP_CONCURRENCY", "4")),
-                                                          doc_fresh_days=DOC_FRESH_DAYS)
+                                                          doc_fresh_days=DOC_FRESH_DAYS, proxy=PROXY)
                 finally:
                     await sink.close()
 
@@ -80,6 +84,11 @@ def main():
                 hub.metric("documents_skipped_fresh", r["skipped"])
             if DEEP and r.get("complete") and r["pages"] <= 1:
                 hub.complete([item["key"]], "failed", error="start page gave no links (blocked or down from this vantage)")
+                continue
+            if DEEP and not r.get("complete", True) and r["pages"] >= MAX_PAGES:
+                # at the page cap: the walk cannot go on, so the host is done for this cycle (before 2026-11-18 such a host
+                # went back to pending, every job stopped it at once, and after 40 tries the hub marked it failed)
+                hub.complete([item["key"]], "done", fetched=r["pages"] + r["documents"])
                 continue
             if DEEP and not r.get("complete", True):
                 hub.complete([item["key"]], "pending", fetched=r["pages"] + r["documents"])   # resume in the next job
