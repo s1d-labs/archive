@@ -148,3 +148,13 @@ CREATE INDEX IF NOT EXISTS document_unchecked ON document (content_sha) WHERE ok
 
 -- "captures in the last N minutes" (stats, health checks, the ramp controller): without this every such count read all of capture.
 CREATE INDEX IF NOT EXISTS capture_fetched ON capture (fetched_at);
+
+-- Provenance corrections (2026-11-19). Captures are never changed; a wrong vantage label is corrected here, per run.
+-- Until 7917e5b (2026-11-18 21:04 IST) archive_task.py ignored the hub's proxy: captures labelled IN-proxy / IN-server from
+-- GitHub runner jobs came from outside India. scripts/tag_vantage.sh fills this table from the hub's runs table.
+CREATE TABLE IF NOT EXISTS vantage_fix (
+  run_id text PRIMARY KEY, labelled text NOT NULL, actual text NOT NULL, captures bigint, note text,
+  tagged_at timestamptz NOT NULL DEFAULT now());
+CREATE OR REPLACE VIEW capture_provenance AS
+  SELECT c.*, coalesce(f.actual, c.vantage) AS actual_vantage, f.note AS vantage_note
+  FROM capture c LEFT JOIN vantage_fix f ON f.run_id = c.run_id;
