@@ -39,6 +39,7 @@ DEAD_END = _re.compile(r"/(login|logout|signin|sign-in|signup|register|account|c
 #   /@%7B/careers/@%7B/careers/...${ENFLAG}                                    (unrendered page templates)
 TEMPLATE = _re.compile(r"(\$\{|@\{|\{\{|<%|<\?|%7B%7B|@%7B|\$%7B|%3C%3F|%3C%25)", _re.I)
 DOMAIN_SEG = _re.compile(r"^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|org|net|in|co|me|io|gov|nic)$", _re.I)
+START_RETRY_WAITS = (5, 15, 30)   # seconds before each retry of a start page that gave no answer
 MAX_DEPTH = 15          # path segments; real sites stay far below
 SEG_REPEAT = 3          # the same non-empty segment this many times in one path = a loop
 
@@ -352,6 +353,15 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
             inflight.add(url)
             try:
                 meta, body = await _get(session, url, proxy)
+                if meta["status"] == 0 and url == start_url:
+                    # the start page decides whether the whole host counts as blocked: retry a connection failure (a
+                    # proxied fetch fails now and then; 2026-11-18: 77 of 103 start pages from one India worker, most
+                    # of which loaded through the same proxies a minute later)
+                    for wait in START_RETRY_WAITS:
+                        await asyncio.sleep(wait)
+                        meta, body = await _get(session, url, proxy)
+                        if meta["status"]:
+                            break
                 await sink.send(url, meta["status"], meta.get("final"), body, meta.get("ctype"))
                 pages += 1
                 if body and b"html" in (meta.get("ctype") or "").encode():
