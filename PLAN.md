@@ -233,6 +233,9 @@ foundation and a usable archive; 3 scales it; 4–6 deepen it. 4–6 run continu
    there is ever a decision to publish. We still record the `personal_data` / `visibility` flags on records so a future
    public layer is possible without re-work; for now `visibility` is irrelevant because nothing is served publicly.
 4. **Re-crawl cadence (Phase 6):** decide after the first full crawl (we'll have real volatility data then).
+   **Update 2026-11-18 (owner):** monthly deep pass per host (30 days after its last deep crawl ended; `archive-recrawl`
+   timer, ~/setup/162-archive-recrawl.sh); weekly light pass OFF for now; documents not re-downloaded within 25 days
+   (`DOC_FRESH_DAYS`, `/seen`). Keep it light: maintain, do not race (archive-deep max_workers 10, -deep-india 3).
 5. **Repo visibility:** `s1d-labs/archive` — code public, data private.
 6. **Budget:** **no ceiling.** Cost is accepted. We still build cost/size dashboards so it is always *visible* (seen, not
    capped), and use a cold tier for the rarely-touched long tail to keep it sane.

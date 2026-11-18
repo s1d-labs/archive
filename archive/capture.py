@@ -6,6 +6,7 @@ Polite: one request at a time per host, a gap between requests, robots honoured,
 """
 import argparse
 import asyncio
+import html as _html
 import base64
 import json
 import time
@@ -31,20 +32,63 @@ from urllib.parse import parse_qsl, urlencode, urlunsplit
 JUNK_PARAM = _re.compile(r"^(utm_\w+|fbclid|gclid|mc_\w+|_ga|sessionid|jsessionid|phpsessid|sid|cid|sort|order|orderby|dir|"
                          r"limit|mode|view|layout|print|share|replytocom|ref|referer|return_?url|redirect|lang_switch|t|ts|_)$", _re.I)
 DEAD_END = _re.compile(r"/(login|logout|signin|sign-in|signup|register|account|customer|cart|checkout|wishlist|compare|"
-                       r"catalogsearch|search|calendar|print|share|feed|wp-json|xmlrpc)(/|$|\.)", _re.I)
+                       r"catalogsearch|search|calendar|print|share|feed|wp-json|xmlrpc|sendfriend|uenc)(/|$|\.)", _re.I)
+# Relative-link loops (2026-11-18: four deep-pass hosts reached the 400,000-page cap with 0-51 documents):
+#   /en/cleanliness/facebook.com/instagram.com/kvhbk1ddn/facebook.com/...   (social links written without https://)
+#   /hi/research-hi/en/en/about/hi/en/about/...                               (language switch links relative to the page)
+#   /@%7B/careers/@%7B/careers/...${ENFLAG}                                    (unrendered page templates)
+TEMPLATE = _re.compile(r"(\$\{|@\{|\{\{|<%|<\?|%7B%7B|@%7B|\$%7B|%3C%3F|%3C%25)", _re.I)
+DOMAIN_SEG = _re.compile(r"^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|org|net|in|co|me|io|gov|nic)$", _re.I)
+MAX_DEPTH = 15          # path segments; real sites stay far below
+SEG_REPEAT = 3          # the same non-empty segment this many times in one path = a loop
+
+
+def looped(path, host=""):
+    """True for a path that a relative-link loop or an unrendered template made, not a real page. A folder named after
+    another domain is a loop ("facebook.com"); one named after the site itself is not (Drupal: /sites/<host>/files/)."""
+    if TEMPLATE.search(path):
+        return True
+    segs = [x for x in path.split("/") if x]
+    if len(segs) > MAX_DEPTH:
+        return True
+    own = (host or "").lower().removeprefix("www.")
+    if any(DOMAIN_SEG.match(x) and x.lower().removeprefix("www.") != own for x in segs[:-1]):
+        return True                                    # "facebook.com" as a folder: a link written without its scheme
+    seen = {}
+    for x in segs:
+        seen[x] = seen.get(x, 0) + 1
+        if seen[x] >= SEG_REPEAT:
+            return True
+    return False
+
+
 MAX_PARAMS = 3          # more query parameters than this = a filter combination, not a page
+DOC_PARAMS = 6          # documents: DotNetNuke LinkClick.aspx?fileticket=&tabid=&portalid=&language= is one file
+
+
+def doc_key(u, host):
+    """The key a document is fetched once under: the url itself, or for a looped path the file name + query (all loop
+    variants of one file share it)."""
+    p = urlsplit(u)
+    if looped(p.path, host):
+        return "loop:" + p.path.rstrip("/").rsplit("/", 1)[-1] + ("?" + p.query if p.query else "")
+    return u
 PATH_CAP = 5000         # at most this many query variants of one path (real id/page lists fit; filter explosions stop)
 PLAIN_CAP = 50          # a path that also exists WITHOUT a query: its query variants are mostly copies (?year=&month=)
 
 
-def canon(u, host):
+def canon(u, host, doc=False):
     """One spelling per URL: start host's www/non-www form, no fragment, no junk parameters, sorted parameters, no '//'
-    in the path. None for a dead end (login, cart, search...) or a filter combination."""
+    in the path. None for a dead end (login, cart, search...), a filter combination, an unrendered template, or a
+    relative-link loop. doc=True: a document under a looped path is kept (some sites link their PDFs only that way and
+    the server ignores the extra folders; capture_host fetches it once, see doc_key), and up to DOC_PARAMS parameters."""
     p = urlsplit(u)
-    if DEAD_END.search(p.path):
+    if DEAD_END.search(p.path) or TEMPLATE.search(u):
+        return None
+    if not doc and looped(p.path, host):
         return None
     q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if not JUNK_PARAM.match(k)]
-    if len(q) > MAX_PARAMS:
+    if len(q) > (DOC_PARAMS if doc else MAX_PARAMS):
         return None
     path = _re.sub(r"/{2,}", "/", p.path) or "/"
     netloc = p.netloc.lower()                          # keep the port; hosts are case-blind; unify www / non-www below
@@ -63,14 +107,15 @@ def links(base, html):
     pages, docs = [], []
     for m in re.finditer(rb'href=["\']([^"\'#]+)', html[:3_000_000]):
         try:
-            u, _ = urldefrag(urljoin(base, m.group(1).decode("utf-8", "replace")))
+            href = _html.unescape(m.group(1).decode("utf-8", "replace").strip())   # "&amp;" in an href means "&"
+            u, _ = urldefrag(urljoin(base, href))
         except ValueError:
             continue
         p = urlsplit(u)
         if p.scheme not in ("http", "https"):
             continue
         low = p.path.lower()
-        if low.endswith(DOC_EXT):
+        if low.endswith(DOC_EXT) or low.endswith("/linkclick.aspx"):
             docs.append(u)
         elif not low.endswith(SKIP):
             pages.append(u)
@@ -318,14 +363,14 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
                                 q.append(c)
                     want = {}
                     for d in dl:
-                        d = canon(d, host) if same_site(host, urlsplit(d).hostname) else None
-                        if d and d not in seen_docs:
-                            want[d] = True
-                    fresh = await sink.fresh(want, doc_fresh_days) if want else set()
-                    for d in want:
-                        if d in seen_docs or docs >= max_docs:
+                        d = canon(d, host, doc=True) if same_site(host, urlsplit(d).hostname) else None
+                        if d and doc_key(d, host) not in seen_docs:
+                            want.setdefault(doc_key(d, host), d)
+                    fresh = await sink.fresh(list(want.values()), doc_fresh_days) if want else set()
+                    for k, d in want.items():
+                        if k in seen_docs or docs >= max_docs:
                             continue
-                        seen_docs.add(d)
+                        seen_docs.add(k)
                         if d in fresh:
                             skipped += 1
                             continue
