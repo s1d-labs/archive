@@ -85,7 +85,8 @@ def auth(authorization: str = Header(default="")):
 async def seen_recently(request: Request):
     """Which of these urls already have a 2xx capture in the last `days` days. A worker asks before it fetches documents,
     so a re-crawl (or a retried host) does not download unchanged files again (2026-11-18: one static PDF had 103 captures
-    in 12 days, all the same bytes). Body: {urls: [...] (at most 500), days: N}. Returns {fresh: [...]}."""
+    in 12 days, all the same bytes). A copy that failed the integrity check (document.ok = false: a truncated PDF) does
+    not count, so the next pass fetches it again. Body: {urls: [...] (at most 500), days: N}. Returns {fresh: [...]}."""
     b = await request.json()
     urls = [u for u in (b.get("urls") or []) if isinstance(u, str)][:500]
     days = float(b.get("days") or 0)
@@ -97,7 +98,9 @@ async def seen_recently(request: Request):
             return [r["url"] for r in c.execute(
                 """SELECT u.url FROM unnest(%s::text[]) AS u(url)
                    WHERE EXISTS (SELECT 1 FROM capture c WHERE c.url = u.url AND c.fetched_at > now() - make_interval(secs => %s)
-                                 AND c.http_status BETWEEN 200 AND 299)""", (urls, days * 86400)).fetchall()]
+                                 AND c.http_status BETWEEN 200 AND 299
+                                 AND NOT EXISTS (SELECT 1 FROM document d WHERE d.content_sha = c.content_sha
+                                                 AND d.ok = false))""", (urls, days * 86400)).fetchall()]
     return {"fresh": await asyncio.to_thread(q)}
 
 

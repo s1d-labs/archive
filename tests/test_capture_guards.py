@@ -67,3 +67,8 @@ def test_shop_noise_dropped():
               "https://www.indiahandmade.com/sendfriend/product/send/id/5/",
               "https://www.indiahandmade.com/stores/store/redirect/___store/hi/___from_store/en/uenc/aHR0cHM6Ly93"]:
         assert canon(u, host(u)) is None, u
+
+
+def test_science_mirror_excluded():
+    assert canon("https://ibdc.dbt.gov.in/isda/ftp/mmCIF/uu/3uun.cif.gz", "ibdc.dbt.gov.in") is None
+    assert canon("https://ibdc.dbt.gov.in/about-us", "ibdc.dbt.gov.in") is not None

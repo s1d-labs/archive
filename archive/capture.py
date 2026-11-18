@@ -63,6 +63,15 @@ def looped(path, host=""):
     return False
 
 
+# Not government records: mirrors of world science databases on .gov.in hosts (2026-11-18: ibdc.dbt.gov.in /isda/ftp/ is
+# a copy of the Protein Data Bank, 1.5 M structure files queued in one deep pass).
+EXCLUDE = {"ibdc.dbt.gov.in": ("/isda/ftp/", "/isda/api/")}
+
+
+def excluded(host, path):
+    return any(path.startswith(x) for x in EXCLUDE.get((host or "").lower().removeprefix("www."), ()))
+
+
 MAX_PARAMS = 3          # more query parameters than this = a filter combination, not a page
 DOC_PARAMS = 6          # documents: DotNetNuke LinkClick.aspx?fileticket=&tabid=&portalid=&language= is one file
 
@@ -84,7 +93,7 @@ def canon(u, host, doc=False):
     relative-link loop. doc=True: a document under a looped path is kept (some sites link their PDFs only that way and
     the server ignores the extra folders; capture_host fetches it once, see doc_key), and up to DOC_PARAMS parameters."""
     p = urlsplit(u)
-    if DEAD_END.search(p.path) or TEMPLATE.search(u):
+    if DEAD_END.search(p.path) or TEMPLATE.search(u) or excluded(p.hostname or host, p.path):
         return None
     if not doc and looped(p.path, host):
         return None
