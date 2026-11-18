@@ -24,6 +24,8 @@ def from_pdf(data: bytes) -> str:
                 return " ".join(out.stdout.decode("utf-8", "replace").split())
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
+    if len(data) > 50 * 1024 * 1024:
+        return ""                                    # pypdf on a very large file: no time limit, memory blow-up
     try:
         import io
 

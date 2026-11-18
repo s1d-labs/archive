@@ -9,6 +9,7 @@ import asyncio
 import html as _html
 import base64
 import json
+import os
 import time
 from collections import deque
 from urllib.parse import urldefrag, urljoin, urlsplit
@@ -39,6 +40,7 @@ DEAD_END = _re.compile(r"/(login|logout|signin|sign-in|signup|register|account|c
 #   /@%7B/careers/@%7B/careers/...${ENFLAG}                                    (unrendered page templates)
 TEMPLATE = _re.compile(r"(\$\{|@\{|\{\{|<%|<\?|%7B%7B|@%7B|\$%7B|%3C%3F|%3C%25)", _re.I)
 DOMAIN_SEG = _re.compile(r"^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|org|net|in|co|me|io|gov|nic)$", _re.I)
+MAX_BODY = int(os.environ.get("ARCHIVE_MAX_BODY_MB", "512")) << 20   # largest object a worker holds in memory
 START_RETRY_WAITS = (5, 15, 30)   # seconds before each retry of a start page that gave no answer
 MAX_DEPTH = 15          # path segments; real sites stay far below
 SEG_REPEAT = 3          # the same non-empty segment this many times in one path = a loop
@@ -153,7 +155,7 @@ class Sink:
             self._buf = []                            # metadata buffered, flushed to /ingest/batch in groups (see _direct)
             self._lock = threading.Lock()             # sends may run in parallel threads (bucket_task): one batch at a time
 
-    async def send(self, url, status, final_url, content, content_type, linked_from=None, fetched_at=None):
+    async def send(self, url, status, final_url, content, content_type, linked_from=None, fetched_at=None, err=None):
         if self.mode == "local":
             from . import ingest
             return await asyncio.to_thread(ingest.ingest, url, content, content_type=content_type, vantage=self.vantage,
@@ -161,9 +163,9 @@ class Sink:
         if self.mode == "b2":
             return await asyncio.to_thread(self._to_b2, url, status, final_url, content, content_type, linked_from)
         if self.mode == "direct":
-            return await asyncio.to_thread(self._direct, url, status, final_url, content, content_type, linked_from, fetched_at)
+            return await asyncio.to_thread(self._direct, url, status, final_url, content, content_type, linked_from, fetched_at, err)
         body = {"url": url, "http_status": status, "final_url": final_url, "content_type": content_type,
-                "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from,
+                "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from, "err": err,
                 "body_b64": base64.b64encode(content).decode() if content is not None else None}
         async with self._s.post(f"{self.api}/ingest", json=body) as r:
             if r.status >= 300:                      # fail loudly so a bad ingest is retried, never silently dropped
@@ -210,12 +212,12 @@ class Sink:
                 return r.status
         return self._retry(go)
 
-    def _direct(self, url, status, final_url, content, content_type, linked_from, fetched_at=None):
+    def _direct(self, url, status, final_url, content, content_type, linked_from, fetched_at=None, err=None):
         """Scale path: hash + extract here, upload the blob (and text) straight to B2 via presigned URLs, then report
         only metadata + text to the ingest API. dev-vps-2 never touches the bytes, so the pool can run many workers."""
         from . import store, text
         meta = {"url": url, "http_status": status, "final_url": final_url, "content_type": content_type,
-                "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from,
+                "vantage": self.vantage, "run_id": self.run_id, "linked_from": linked_from, "err": err,
                 "content_sha": None, "size": 0, "text_sha": None, "text_chars": 0}
         if fetched_at:
             meta["fetched_at"] = fetched_at              # a Wayback copy keeps the date the page was really captured
@@ -371,7 +373,7 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
                         meta, body = await _get(session, url, proxy)
                         if meta["status"]:
                             break
-                await sink.send(url, meta["status"], meta.get("final"), body, meta.get("ctype"))
+                await sink.send(url, meta["status"], meta.get("final"), body, meta.get("ctype"), err=meta.get("err"))
                 pages += 1
                 if body and b"html" in (meta.get("ctype") or "").encode():
                     pl, dl = links(meta.get("final") or url, body)
@@ -394,7 +396,8 @@ async def capture_host(session, start_url, sink, max_pages=2000, max_docs=20000,
                             skipped += 1
                             continue
                         dmeta, dbody = await _get(session, d, proxy)
-                        await sink.send(d, dmeta["status"], dmeta.get("final"), dbody, dmeta.get("ctype"), linked_from=[url])
+                        await sink.send(d, dmeta["status"], dmeta.get("final"), dbody, dmeta.get("ctype"), linked_from=[url],
+                                        err=dmeta.get("err"))
                         docs += 1
             finally:
                 inflight.discard(url)
@@ -414,12 +417,14 @@ async def _get(session, url, proxy=None):
     try:
         async with session.get(url, allow_redirects=True, proxy=proxy) as r:
             buf = bytearray()                               # read the WHOLE body: content.read(n) returns only the first
-            capped = False
             async for chunk in r.content.iter_chunked(1 << 16):  # chunk, which truncated larger PDFs/pages
                 buf += chunk
-                if len(buf) > 50 * 1024 * 1024:             # 50 MB cap per object
-                    capped = True
-                    break
+                if len(buf) > MAX_BODY:
+                    # too big to hold: report a failed fetch, never a cut-off copy (until 2026-11-19 a 50 MB cap stored
+                    # the first 50 MB: 22,000 truncated PDFs, 1,075 GB in B2, each failing the integrity check)
+                    return {"status": 0, "final": str(r.url), "ctype": r.headers.get("Content-Type"),
+                            "err": f"too-large >{MAX_BODY >> 20} MB"}, None
+            capped = False
             # integrity guard: an uncompressed body shorter than the server's declared length = an incomplete read (dropped
             # connection). Don't store a truncated blob — report it as a failed fetch so it is retried, not silently kept.
             clen = r.headers.get("Content-Length")

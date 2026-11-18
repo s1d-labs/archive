@@ -17,10 +17,17 @@ def _host(url):
     return (urlsplit(url).hostname or "").lower()
 
 
-def _is_document(url, content_type):
+def _is_document(url, content_type, status=None):
+    """A document = a 2xx answer that is not an HTML page, at a document url or with a document content type. Until
+    2026-11-19 a .pdf url was a document whatever came back, so a site's HTML error page or a 404 at a PDF address counted
+    as a broken PDF in validate (document.ok = false)."""
     ct = (content_type or "").lower()
-    return bool(DOC_EXT.search(url)) or ("html" not in ct and ("pdf" in ct or "excel" in ct or "spreadsheet" in ct
-                                         or "msword" in ct or "officedocument" in ct or ct.startswith("application/")))
+    if status is not None and not 200 <= int(status or 0) < 300:
+        return False
+    if "html" in ct:
+        return False
+    return bool(DOC_EXT.search(url)) or ("pdf" in ct or "excel" in ct or "spreadsheet" in ct
+                                         or "msword" in ct or "officedocument" in ct or ct.startswith("application/"))
 
 
 def ingest(url, content, content_type=None, fetched_at=None, vantage="dev-vps-2", http_status=200, final_url=None,
@@ -30,7 +37,7 @@ def ingest(url, content, content_type=None, fetched_at=None, vantage="dev-vps-2"
     if isinstance(fetched_at, str):
         fetched_at = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
     host = _host(final_url or url)
-    is_doc = _is_document(final_url or url, content_type)
+    is_doc = _is_document(final_url or url, content_type, http_status)
     sha = tkey_chars = None
     newly = txt = None
     with db.conn(INGEST_TIMEOUT) as c:
@@ -78,7 +85,7 @@ def _meta_rows(c, b, known=None):
     sha = b.get("content_sha")
     ct = b.get("content_type")
     host = _host(b.get("final_url") or url)
-    is_doc = _is_document(b.get("final_url") or url, ct)
+    is_doc = _is_document(b.get("final_url") or url, ct, b.get("http_status", 200))
     if sha and known is not None and sha in known:
         pass                                           # blob row complete (text indexed): no rewrite, no to_tsvector, no GIN work
     elif sha:
@@ -100,10 +107,11 @@ def _meta_rows(c, b, known=None):
                          ON CONFLICT (content_sha) DO NOTHING""",
                       (sha, (m.group(1).lower() if m else None), json.dumps((b.get("linked_from") or [])[:20])))
     return c.execute("""INSERT INTO capture (url, host, fetched_at, vantage, http_status, final_url, content_sha,
-                          content_type, is_document, headers, robots_ok, run_id)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                          content_type, is_document, headers, robots_ok, run_id, err)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                      (url, host, fetched_at, b.get("vantage", "pool"), b.get("http_status", 200), b.get("final_url"),
-                      sha, ct, is_doc, json.dumps(b.get("headers") or {}), b.get("robots_ok"), b.get("run_id"))).fetchone()
+                      sha, ct, is_doc, json.dumps(b.get("headers") or {}), b.get("robots_ok"), b.get("run_id"),
+                      (b.get("err") or None) and str(b.get("err"))[:200])).fetchone()
 
 
 def _clean(v):
